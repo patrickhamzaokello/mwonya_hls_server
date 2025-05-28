@@ -1,0 +1,65 @@
+version: '3.8'
+
+services:
+  audio-streaming-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: audio-streaming-server
+    ports:
+      - "5010:5010"
+    environment:
+      # AWS Configuration
+      - S3_BUCKET_NAME=${S3_BUCKET_NAME}
+      - S3_PREFIX=${S3_PREFIX:-hls}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      
+      # Server Configuration
+      - PORT=5010
+      
+      # Optional: Set timezone
+      - TZ=${TZ:-UTC}
+    
+    # Health check
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:5010/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    
+    # Resource limits (adjust based on your needs)
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+        reservations:
+          memory: 256M
+          cpus: '0.25'
+    
+    # Restart policy
+    restart: unless-stopped
+    
+    # Logging configuration
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    
+    # Security options
+    security_opt:
+      - no-new-privileges:true
+    
+    # Read-only filesystem (except for tmp)
+    read_only: true
+    tmpfs:
+      - /tmp:noexec,nosuid,size=100m
+
+
+networks:
+  default:
+    name: audio-streaming-network
