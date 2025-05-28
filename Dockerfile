@@ -38,10 +38,13 @@ WORKDIR /app
 # Copy the binary from builder stage
 COPY --from=builder /app/streaming-server .
 
+# Copy static files (dashboard, assets, etc.)
+COPY --from=builder /app/static ./static
+
 # Copy timezone data
 COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
 
-# Change ownership to non-root user
+# Change ownership to non-root user (including static files)
 RUN chown -R appuser:appgroup /app
 
 # Switch to non-root user
