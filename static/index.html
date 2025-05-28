@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audio Streaming Server Dashboard</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+            background: #fafafa;
+            color: #333;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 40px 20px;
+        }
+
+        .header {
+            margin-bottom: 60px;
+        }
+
+        .header h1 {
+            font-size: 1.8rem;
+            font-weight: 400;
+            color: #111;
+            margin-bottom: 8px;
+            letter-spacing: -0.02em;
+        }
+
+        .header .status {
+            font-size: 0.9rem;
+            color: #666;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .status-dot {
+            width: 6px;
+            height: 6px;
+            background: #111;
+            border-radius: 50%;
+        }
+
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 1px;
+            background: #e0e0e0;
+            border: 1px solid #e0e0e0;
+            margin-bottom: 60px;
+        }
+
+        .stat-card {
+            background: white;
+            padding: 32px 24px;
+            text-align: center;
+            transition: background-color 0.2s ease;
+        }
+
+        .stat-card:hover {
+            background: #f8f8f8;
+        }
+
+        .stat-value {
+            font-size: 1.8rem;
+            font-weight: 300;
+            color: #111;
+            margin-bottom: 8px;
+            letter-spacing: -0.02em;
+        }
+
+        .stat-label {
+            font-size: 0.8rem;
+            color: #666;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            font-weight: 500;
+        }
+
+        .tracks-section {
+            background: white;
+            border: 1px solid #e0e0e0;
+        }
+
+        .section-header {
+            padding: 32px 32px 24px;
+            border-bottom: 1px solid #f0f0f0;
+        }
+
+        .section-title {
+            font-size: 1.2rem;
+            font-weight: 400;
+            color: #111;
+            margin-bottom: 4px;
+            letter-spacing: -0.01em;
+        }
+
+        .section-subtitle {
+            font-size: 0.85rem;
+            color: #666;
+        }
+
+        .search-container {
+            padding: 0 32px 24px;
+            border-bottom: 1px solid #f0f0f0;
+        }
+
+        .search-input {
+            width: 100%;
+            padding: 12px 0;
+            border: none;
+            border-bottom: 1px solid #e0e0e0;
+            font-size: 0.95rem;
+            background: transparent;
+            transition: border-color 0.2s ease;
+        }
+
+        .search-input:focus {
+            outline: none;
+            border-bottom-color: #111;
+        }
+
+        .search-input::placeholder {
+            color: #999;
+        }
+
+        .tracks-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .tracks-table th {
+            padding: 20px 32px;
+            text-align: left;
+            font-weight: 500;
+            color: #666;
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            background: #fafafa;
+            border-bottom: 1px solid #f0f0f0;
+        }
+
+        .tracks-table td {
+            padding: 20px 32px;
+            border-bottom: 1px solid #f8f8f8;
+            vertical-align: middle;
+        }
+
+        .tracks-table tbody tr {
+            transition: background-color 0.1s ease;
+        }
+
+        .tracks-table tbody tr:hover {
+            background: #fafafa;
+        }
+
+        .track-id {
+            font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+            font-size: 0.8rem;
+            color: #666;
+            background: #f5f5f5;
+            padding: 2px 6px;
+            border-radius: 2px;
+        }
+
+        .track-title {
+            font-weight: 400;
+            color: #111;
+            margin-bottom: 2px;
+            font-size: 0.95rem;
+        }
+
+        .track-artist {
+            color: #666;
+            font-size: 0.85rem;
+        }
+
+        .track-duration {
+            font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+            font-size: 0.85rem;
+            color: #666;
+        }
+
+        .stream-count {
+            font-weight: 400;
+            color: #111;
+            font-size: 0.95rem;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 60px;
+            color: #999;
+            font-size: 0.9rem;
+        }
+
+        .spinner {
+            display: inline-block;
+            width: 16px;
+            height: 16px;
+            border: 1px solid #f0f0f0;
+            border-top: 1px solid #111;
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 12px;
+            vertical-align: middle;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 60px;
+            color: #999;
+            font-size: 0.9rem;
+        }
+
+        .error-state {
+            text-align: center;
+            padding: 60px;
+            color: #666;
+            font-size: 0.9rem;
+        }
+
+        @media (max-width: 768px) {
+            .container {
+                padding: 20px 15px;
+            }
+
+            .header {
+                margin-bottom: 40px;
+            }
+
+            .stats-grid {
+                grid-template-columns: repeat(2, 1fr);
+                margin-bottom: 40px;
+            }
+
+            .stat-card {
+                padding: 24px 16px;
+            }
+
+            .section-header {
+                padding: 24px 20px 20px;
+            }
+
+            .search-container {
+                padding: 0 20px 20px;
+            }
+
+            .tracks-table th,
+            .tracks-table td {
+                padding: 16px 20px;
+            }
+
+            .stat-value {
+                font-size: 1.5rem;
+            }
+        }
+
+        @media (max-width: 480px) {
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Mwonya Audio Streaming Dashboard</h1>
+            <div class="status">
+                <div class="status-dot"></div>
+                <span>Server Online</span>
+            </div>
+        </div>
+        
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-value" id="uptime">—</div>
+                <div class="stat-label">Uptime</div>
+            </div>
+            
+            <div class="stat-card">
+                <div class="stat-value" id="total-streams">—</div>
+                <div class="stat-label">Total Streams</div>
+            </div>
+            
+            <div class="stat-card">
+                <div class="stat-value" id="active-streams">—</div>
+                <div class="stat-label">Active</div>
+            </div>
+            
+            <div class="stat-card">
+                <div class="stat-value" id="bandwidth">—</div>
+                <div class="stat-label">Bandwidth</div>
+            </div>
+            
+            <div class="stat-card">
+                <div class="stat-value" id="cache-ratio">—</div>
+                <div class="stat-label">Cache Hit Rate</div>
+            </div>
+            
+            <div class="stat-card">
+                <div class="stat-value" id="cache-stats">—</div>
+                <div class="stat-label">Cache Stats</div>
+            </div>
+        </div>
+        
+        <div class="tracks-section">
+            <div class="section-header">
+                <div class="section-title">Music Library</div>
+                <div class="section-subtitle">Track performance and statistics</div>
+            </div>
+            
+            <div class="search-container">
+                <input type="text" class="search-input" placeholder="Search tracks..." id="search-input">
+            </div>
+            
+            <table class="tracks-table">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Track</th>
+                        <th>Duration</th>
+                        <th>Streams</th>
+                    </tr>
+                </thead>
+                <tbody id="tracks-tbody">
+                    <tr>
+                        <td colspan="4" class="loading">
+                            <div class="spinner"></div>
+                            Loading...
+                        </td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        let tracksData = [];
+        
+        async function loadStats() {
+            try {
+                const response = await fetch('/stats');
+                const stats = await response.json();
+                
+                document.getElementById('uptime').textContent = stats.uptime;
+                document.getElementById('total-streams').textContent = stats.total_streams.toLocaleString();
+                document.getElementById('active-streams').textContent = stats.active_streams;
+                document.getElementById('bandwidth').textContent = `${(stats.bandwidth_usage / (1024 * 1024)).toFixed(1)}MB`;
+                
+                const cacheRatio = stats.cache_hits / (stats.cache_hits + stats.cache_misses) * 100 || 0;
+                document.getElementById('cache-ratio').textContent = `${cacheRatio.toFixed(0)}%`;
+                document.getElementById('cache-stats').textContent = `${stats.cache_hits}/${stats.cache_hits + stats.cache_misses}`;
+                
+            } catch (error) {
+                console.error('Error loading stats:', error);
+            }
+        }
+        
+        async function loadTracks() {
+            try {
+                const [tracksResponse, statsResponse] = await Promise.all([
+                    fetch('/tracks'),
+                    fetch('/stats')
+                ]);
+                
+                const tracks = await tracksResponse.json();
+                const stats = await statsResponse.json();
+                
+                tracksData = tracks.map(track => ({
+                    ...track,
+                    streams: stats.track_streams[track.id] || 0
+                }));
+                
+                displayTracks(tracksData);
+                
+            } catch (error) {
+                console.error('Error loading tracks:', error);
+                document.getElementById('tracks-tbody').innerHTML = `
+                    <tr>
+                        <td colspan="4" class="error-state">
+                            Failed to load tracks
+                        </td>
+                    </tr>
+                `;
+            }
+        }
+        
+        function displayTracks(tracks) {
+            const tbody = document.getElementById('tracks-tbody');
+            
+            if (tracks.length === 0) {
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="4" class="empty-state">
+                            No tracks found
+                        </td>
+                    </tr>
+                `;
+                return;
+            }
+            
+            tbody.innerHTML = tracks.map(track => `
+                <tr>
+                    <td>
+                        <span class="track-id">${track.id}</span>
+                    </td>
+                    <td>
+                        <div class="track-title">${track.title}</div>
+                        <div class="track-artist">${track.artist}</div>
+                    </td>
+                    <td>
+                        <span class="track-duration">${Math.floor(track.duration / 60)}:${(track.duration % 60).toString().padStart(2, '0')}</span>
+                    </td>
+                    <td>
+                        <span class="stream-count">${track.streams.toLocaleString()}</span>
+                    </td>
+                </tr>
+            `).join('');
+        }
+        
+        function filterTracks() {
+            const searchTerm = document.getElementById('search-input').value.toLowerCase();
+            const filtered = tracksData.filter(track => 
+                track.title.toLowerCase().includes(searchTerm) ||
+                track.artist.toLowerCase().includes(searchTerm) ||
+                track.id.toString().includes(searchTerm)
+            );
+            displayTracks(filtered);
+        }
+        
+        document.getElementById('search-input').addEventListener('input', filterTracks);
+        
+        loadStats();
+        loadTracks();
+        setInterval(loadStats, 5000);
+        setInterval(loadTracks, 5000);
+    </script>
+</body>
+</html>

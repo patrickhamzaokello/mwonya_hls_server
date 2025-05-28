@@ -28,6 +28,18 @@ type AudioTrack struct {
 	Duration int    `json:"duration"` // in seconds
 }
 
+type StreamingStats struct {
+	TotalStreams      int64            `json:"total_streams"`
+	TrackStreams      map[string]int64 `json:"track_streams"`
+	ActiveStreams     int64            `json:"active_streams"`
+	BandwidthUsage    int64            `json:"bandwidth_usage"` // in bytes
+	StartTime         time.Time        `json:"start_time"`
+	Uptime            string           `json:"uptime"`
+	CacheHits         int64            `json:"cache_hits"`
+	CacheMisses       int64            `json:"cache_misses"`
+	SignedURLRequests int64            `json:"signed_url_requests"`
+}
+
 type StreamingServer struct {
 	s3Client       *s3.Client
 	presignClient  *s3.PresignClient
@@ -37,6 +49,7 @@ type StreamingServer struct {
 	segmentCache   map[string][]byte
 	signedURLCache map[string]*SignedURLCacheItem
 	rateLimiter    map[string]time.Time
+	stats          StreamingStats
 	mu             sync.RWMutex
 	
 	// Cache configuration
@@ -104,6 +117,10 @@ func NewStreamingServer(bucketName, s3Prefix, region, accessKey, secretKey strin
 		cacheExpiry:        24 * time.Hour,
 		signedURLExpiry:    15 * time.Minute, // Signed URLs expire in 15 minutes
 		signedURLCacheSize: 5000, // Maximum cached signed URLs
+		stats: StreamingStats{
+			TrackStreams: make(map[string]int64),
+			StartTime:    time.Now(),
+		},
 	}, nil
 }
 
@@ -160,6 +177,11 @@ func (s *StreamingServer) getSignedURL(key string) (string, error) {
 		url:       request.URL,
 		expiresAt: time.Now().Add(s.signedURLExpiry),
 	}
+	s.mu.Unlock()
+
+	// Update stats
+	s.mu.Lock()
+	s.stats.SignedURLRequests++
 	s.mu.Unlock()
 
 	return request.URL, nil
@@ -305,6 +327,13 @@ func (s *StreamingServer) handleMasterPlaylist(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// Update stats for this track
+	s.mu.Lock()
+	s.stats.TotalStreams++
+	s.stats.TrackStreams[trackID]++
+	s.stats.ActiveStreams++
+	s.mu.Unlock()
+
 	// Set proper headers for M3U8
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
@@ -445,6 +474,12 @@ func (s *StreamingServer) handleSegment(w http.ResponseWriter, r *http.Request) 
 	if cachedData, exists := s.segmentCache[cacheKey]; exists {
 		s.mu.RUnlock()
 		
+		// Update stats
+		s.mu.Lock()
+		s.stats.CacheHits++
+		s.stats.BandwidthUsage += int64(len(cachedData))
+		s.mu.Unlock()
+		
 		w.Header().Set("Content-Type", "video/MP2T")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Cache-Control", "max-age=86400") // Cache for 24 hours
@@ -464,6 +499,12 @@ func (s *StreamingServer) handleSegment(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "Segment not found", http.StatusNotFound)
 		return
 	}
+
+	// Update stats
+	s.mu.Lock()
+	s.stats.CacheMisses++
+	s.stats.BandwidthUsage += int64(len(data))
+	s.mu.Unlock()
 
 	// Cache the segment if cache isn't full
 	s.mu.Lock()
@@ -509,15 +550,34 @@ func (s *StreamingServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	
+	// Calculate uptime
+	s.mu.RLock()
+	uptime := time.Since(s.stats.StartTime).Round(time.Second)
+	s.mu.RUnlock()
+
 	health := map[string]interface{}{
-		"status":         "healthy",
-		"timestamp":      time.Now().Format(time.RFC3339),
-		"cache_size":     len(s.segmentCache),
-		"tracks_loaded":  len(s.tracks),
+		"status":             "healthy",
+		"timestamp":          time.Now().Format(time.RFC3339),
+		"cache_size":         len(s.segmentCache),
+		"tracks_loaded":      len(s.tracks),
 		"signed_urls_cached": len(s.signedURLCache),
+		"uptime":            uptime.String(),
 	}
 	
 	json.NewEncoder(w).Encode(health)
+}
+
+func (s *StreamingServer) handleStats(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	// Calculate uptime
+	s.mu.RLock()
+	stats := s.stats
+	stats.Uptime = time.Since(s.stats.StartTime).Round(time.Second).String()
+	s.mu.RUnlock()
+
+	json.NewEncoder(w).Encode(stats)
 }
 
 func (s *StreamingServer) handleCORS(w http.ResponseWriter, r *http.Request) {
@@ -526,6 +586,21 @@ func (s *StreamingServer) handleCORS(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Range")
 	w.Header().Set("Access-Control-Max-Age", "86400")
 	w.WriteHeader(http.StatusOK)
+}
+
+func (s *StreamingServer) handleTrackList(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	tracks := make([]*AudioTrack, 0, len(s.tracks))
+	for _, track := range s.tracks {
+		tracks = append(tracks, track)
+	}
+
+	json.NewEncoder(w).Encode(tracks)
 }
 
 // Middleware for logging and recovery
@@ -589,6 +664,16 @@ func main() {
 		log.Fatalf("Failed to create streaming server: %v", err)
 	}
 
+	// Serve static files from the "static" directory
+	staticDir := "./static"
+	if _, err := os.Stat(staticDir); os.IsNotExist(err) {
+		log.Printf("Warning: Static directory '%s' not found, skipping static file serving", staticDir)
+	} else {
+		fs := http.FileServer(http.Dir(staticDir))
+		http.Handle("/", fs)
+		log.Printf("Serving static files from %s directory", staticDir)
+	}
+
 	// Improved routing with better path matching
 	http.HandleFunc("/stream/", loggingMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "OPTIONS" {
@@ -620,6 +705,8 @@ func main() {
 	}))
 
 	http.HandleFunc("/health", loggingMiddleware(server.handleHealth))
+	http.HandleFunc("/stats", loggingMiddleware(server.handleStats))
+	http.HandleFunc("/tracks", loggingMiddleware(server.handleTrackList))
 
 	// Start background cleanup routines
 	go func() {
@@ -629,6 +716,14 @@ func main() {
 		for range ticker.C {
 			server.cleanupRateLimiter()
 			server.cleanupSignedURLCache()
+			
+			// Update active streams count (simplistic approach - in real app you'd track individual streams)
+			server.mu.Lock()
+			server.stats.ActiveStreams = server.stats.ActiveStreams / 2 // Halve active streams periodically
+			if server.stats.ActiveStreams < 0 {
+				server.stats.ActiveStreams = 0
+			}
+			server.mu.Unlock()
 		}
 	}()
 
@@ -643,6 +738,8 @@ func main() {
 	}
 	log.Printf("🎵 Stream URL format: http://localhost:%s/stream/TRACK_ID/playlist.m3u8", port)
 	log.Printf("❤️  Health check: http://localhost:%s/health", port)
+	log.Printf("📊 Stats: http://localhost:%s/stats", port)
+	log.Printf("🎶 Track list: http://localhost:%s/tracks", port)
 	log.Printf("🔐 Using S3 signed URLs with %v expiry", server.signedURLExpiry)
 
 	log.Fatal(http.ListenAndServe(":"+port, nil))
