@@ -5,20 +5,23 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/joho/godotenv"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/joho/godotenv"
 )
 
 type AudioTrack struct {
@@ -41,18 +44,17 @@ type StreamingStats struct {
 }
 
 type StreamingServer struct {
-	s3Client       *s3.Client
-	presignClient  *s3.PresignClient
-	bucketName     string
-	s3Prefix       string // General folder path in S3
-	tracks         map[string]*AudioTrack
-	segmentCache   map[string][]byte
-	signedURLCache map[string]*SignedURLCacheItem
-	rateLimiter    map[string]time.Time
-	stats          StreamingStats
-	mu             sync.RWMutex
-	
-	// Cache configuration
+	s3Client           *s3.Client
+	presignClient      *s3.PresignClient
+	bucketName         string
+	s3Prefix           string // Folder path for HLS files
+	s3RawPrefix        string // Folder path for raw/non-HLS files
+	tracks             map[string]*AudioTrack
+	segmentCache       map[string][]byte
+	signedURLCache     map[string]*SignedURLCacheItem
+	rateLimiter        map[string]time.Time
+	stats              StreamingStats
+	mu                 sync.RWMutex
 	maxCacheSize       int
 	cacheExpiry        time.Duration
 	signedURLExpiry    time.Duration
@@ -69,13 +71,11 @@ type CacheItem struct {
 	timestamp time.Time
 }
 
-func NewStreamingServer(bucketName, s3Prefix, region, accessKey, secretKey string) (*StreamingServer, error) {
-	// Load AWS config with credentials from environment
+func NewStreamingServer(bucketName, s3Prefix, s3RawPrefix, region, accessKey, secretKey string) (*StreamingServer, error) {
 	var cfg aws.Config
 	var err error
-	
+
 	if accessKey != "" && secretKey != "" {
-		// Use credentials from environment variables
 		cfg, err = config.LoadDefaultConfig(context.TODO(),
 			config.WithRegion(region),
 			config.WithCredentialsProvider(aws.CredentialsProviderFunc(func(ctx context.Context) (aws.Credentials, error) {
@@ -83,15 +83,14 @@ func NewStreamingServer(bucketName, s3Prefix, region, accessKey, secretKey strin
 					AccessKeyID:     accessKey,
 					SecretAccessKey: secretKey,
 				}, nil
-			})),
-		)
+			}),
+			))
 	} else {
-		// Fallback to default AWS config (IAM roles, etc.)
 		cfg, err = config.LoadDefaultConfig(context.TODO(),
 			config.WithRegion(region),
 		)
 	}
-	
+
 	if err != nil {
 		return nil, fmt.Errorf("unable to load AWS config: %v", err)
 	}
@@ -99,9 +98,11 @@ func NewStreamingServer(bucketName, s3Prefix, region, accessKey, secretKey strin
 	s3Client := s3.NewFromConfig(cfg)
 	presignClient := s3.NewPresignClient(s3Client)
 
-	// Ensure s3Prefix ends with / if not empty
 	if s3Prefix != "" && !strings.HasSuffix(s3Prefix, "/") {
 		s3Prefix = s3Prefix + "/"
+	}
+	if s3RawPrefix != "" && !strings.HasSuffix(s3RawPrefix, "/") {
+		s3RawPrefix = s3RawPrefix + "/"
 	}
 
 	return &StreamingServer{
@@ -109,14 +110,15 @@ func NewStreamingServer(bucketName, s3Prefix, region, accessKey, secretKey strin
 		presignClient:      presignClient,
 		bucketName:         bucketName,
 		s3Prefix:           s3Prefix,
+		s3RawPrefix:        s3RawPrefix,
 		tracks:             make(map[string]*AudioTrack),
 		segmentCache:       make(map[string][]byte),
 		signedURLCache:     make(map[string]*SignedURLCacheItem),
 		rateLimiter:        make(map[string]time.Time),
-		maxCacheSize:       1000, // Maximum cached segments
+		maxCacheSize:       1000,
 		cacheExpiry:        24 * time.Hour,
-		signedURLExpiry:    15 * time.Minute, // Signed URLs expire in 15 minutes
-		signedURLCacheSize: 5000, // Maximum cached signed URLs
+		signedURLExpiry:    15 * time.Minute,
+		signedURLCacheSize: 5000,
 		stats: StreamingStats{
 			TrackStreams: make(map[string]int64),
 			StartTime:    time.Now(),
@@ -124,19 +126,54 @@ func NewStreamingServer(bucketName, s3Prefix, region, accessKey, secretKey strin
 	}, nil
 }
 
-// Generate signed URL for S3 object
+func getContentTypeByExtension(filename string) string {
+	ext := strings.ToLower(filepath.Ext(filename))
+	switch ext {
+	case ".mp3":
+		return "audio/mpeg"
+	case ".wav":
+		return "audio/wav"
+	case ".ogg":
+		return "audio/ogg"
+	case ".flac":
+		return "audio/flac"
+	case ".m4a":
+		return "audio/mp4"
+	case ".aac":
+		return "audio/aac"
+	case ".webm":
+		return "audio/webm"
+	default:
+		return "application/octet-stream"
+	}
+}
+
+func (s *StreamingServer) fileExists(key string) (bool, error) {
+	_, err := s.s3Client.HeadObject(context.TODO(), &s3.HeadObjectInput{
+		Bucket: aws.String(s.bucketName),
+		Key:    aws.String(key),
+	})
+
+	if err != nil {
+		var awsErr *types.NotFound
+		if errors.As(err, &awsErr) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
+}
+
 func (s *StreamingServer) getSignedURL(key string) (string, error) {
-	// Check cache first
 	s.mu.RLock()
 	if cached, exists := s.signedURLCache[key]; exists {
-		if time.Now().Before(cached.expiresAt.Add(-2*time.Minute)) { // Refresh 2 minutes before expiry
+		if time.Now().Before(cached.expiresAt.Add(-2 * time.Minute)) {
 			s.mu.RUnlock()
 			return cached.url, nil
 		}
 	}
 	s.mu.RUnlock()
 
-	// Generate new signed URL
 	request, err := s.presignClient.PresignGetObject(context.TODO(), &s3.GetObjectInput{
 		Bucket: aws.String(s.bucketName),
 		Key:    aws.String(key),
@@ -148,25 +185,21 @@ func (s *StreamingServer) getSignedURL(key string) (string, error) {
 		return "", fmt.Errorf("failed to create signed URL for %s: %v", key, err)
 	}
 
-	// Cache the signed URL
 	s.mu.Lock()
-	// Clean up cache if it's getting too large
 	if len(s.signedURLCache) >= s.signedURLCacheSize {
-		// Remove expired entries
 		now := time.Now()
 		for k, v := range s.signedURLCache {
 			if now.After(v.expiresAt) {
 				delete(s.signedURLCache, k)
 			}
 		}
-		
-		// If still too large, remove oldest entries
+
 		if len(s.signedURLCache) >= s.signedURLCacheSize {
 			count := 0
 			for k := range s.signedURLCache {
 				delete(s.signedURLCache, k)
 				count++
-				if count >= s.signedURLCacheSize/4 { // Remove 25% of cache
+				if count >= s.signedURLCacheSize/4 {
 					break
 				}
 			}
@@ -179,7 +212,6 @@ func (s *StreamingServer) getSignedURL(key string) (string, error) {
 	}
 	s.mu.Unlock()
 
-	// Update stats
 	s.mu.Lock()
 	s.stats.SignedURLRequests++
 	s.mu.Unlock()
@@ -187,7 +219,6 @@ func (s *StreamingServer) getSignedURL(key string) (string, error) {
 	return request.URL, nil
 }
 
-// Load track metadata from S3 or database
 func (s *StreamingServer) loadTrackMetadata(trackID string) (*AudioTrack, error) {
 	s.mu.RLock()
 	if track, exists := s.tracks[trackID]; exists {
@@ -196,28 +227,42 @@ func (s *StreamingServer) loadTrackMetadata(trackID string) (*AudioTrack, error)
 	}
 	s.mu.RUnlock()
 
-	// Try to fetch metadata from S3
+	// Try HLS location first
 	metadataKey := fmt.Sprintf("%s%s/metadata.json", s.s3Prefix, trackID)
-	
+	exists, err := s.fileExists(metadataKey)
+	if err != nil {
+		return nil, fmt.Errorf("error checking metadata in HLS location: %v", err)
+	}
+
+	if !exists {
+		// Try raw location if not found in HLS
+		metadataKey = fmt.Sprintf("%s%s/metadata.json", s.s3RawPrefix, trackID)
+		exists, err = s.fileExists(metadataKey)
+		if err != nil {
+			return nil, fmt.Errorf("error checking metadata in raw location: %v", err)
+		}
+		if !exists {
+			track := &AudioTrack{
+				ID:       trackID,
+				Title:    strings.ReplaceAll(trackID, "_", " "),
+				Artist:   "Unknown Artist",
+				Duration: 180,
+			}
+
+			s.mu.Lock()
+			s.tracks[trackID] = track
+			s.mu.Unlock()
+
+			return track, nil
+		}
+	}
+
 	result, err := s.s3Client.GetObject(context.TODO(), &s3.GetObjectInput{
 		Bucket: aws.String(s.bucketName),
 		Key:    aws.String(metadataKey),
 	})
-	
 	if err != nil {
-		// If no metadata file, create default metadata
-		track := &AudioTrack{
-			ID:       trackID,
-			Title:    strings.ReplaceAll(trackID, "_", " "),
-			Artist:   "Unknown Artist",
-			Duration: 180, // Default 3 minutes
-		}
-		
-		s.mu.Lock()
-		s.tracks[trackID] = track
-		s.mu.Unlock()
-		
-		return track, nil
+		return nil, fmt.Errorf("failed to get metadata: %v", err)
 	}
 	defer result.Body.Close()
 
@@ -249,77 +294,68 @@ func (s *StreamingServer) generateMasterPlaylist(trackID string) string {
 `, basePath, basePath, basePath)
 }
 
-// Fix playlist URLs to work with the server's routing
 func (s *StreamingServer) fixPlaylistURLs(content []byte, trackID string, isSegment bool) []byte {
 	scanner := bufio.NewScanner(bytes.NewReader(content))
 	var result strings.Builder
-	
+
 	for scanner.Scan() {
 		line := scanner.Text()
-		
-		// Skip comment lines and empty lines
+
 		if strings.HasPrefix(line, "#") || strings.TrimSpace(line) == "" {
 			result.WriteString(line)
 			result.WriteString("\n")
 			continue
 		}
-		
-		// Handle master playlist URLs (absolute paths starting with /)
+
 		if strings.HasPrefix(line, "/") && strings.HasSuffix(line, "/playlist.m3u8") {
-			// Extract the parts from the absolute path
-			// Example: /mwonya_audio/track_03eea3e1ce1e/low/playlist.m3u8
 			parts := strings.Split(strings.Trim(line, "/"), "/")
 			if len(parts) >= 3 {
-				// Get the quality (last part before playlist.m3u8)
 				quality := parts[len(parts)-2]
-				// Convert to relative path for our server
 				line = fmt.Sprintf("/stream/%s/%s/playlist.m3u8", trackID, quality)
 			}
 		} else if isSegment && strings.HasSuffix(line, ".ts") {
-			// For segment playlists, convert relative segment names to full URLs
-			// segment_000.ts -> /stream/trackID/quality/segment_000.ts
-			// We need to extract quality from the current context
-			line = line // Keep as relative for now, will be handled in segment request
+			line = line
 		}
-		
+
 		result.WriteString(line)
 		result.WriteString("\n")
 	}
-	
+
 	return []byte(result.String())
 }
 
 func (s *StreamingServer) fetchFromS3WithSignedURL(key string) ([]byte, error) {
-	// Construct full S3 key
-	fullKey := s.s3Prefix + key
-	
-	signedURL, err := s.getSignedURL(fullKey)
+	exists, err := s.fileExists(key)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error checking file existence: %w", err)
+	}
+	if !exists {
+		return nil, fmt.Errorf("file not found: %s", key)
+	}
+
+	signedURL, err := s.getSignedURL(key)
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate signed URL: %w", err)
 	}
 
 	resp, err := http.Get(signedURL)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch from signed URL: %v", err)
+		return nil, fmt.Errorf("failed to fetch from signed URL: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("HTTP %d from signed URL", resp.StatusCode)
+		return nil, fmt.Errorf("unexpected status code %d from signed URL", resp.StatusCode)
 	}
 
 	return io.ReadAll(resp.Body)
 }
 
 func (s *StreamingServer) handleMasterPlaylist(w http.ResponseWriter, r *http.Request) {
-	// Extract trackID from URL path
 	path := strings.TrimPrefix(r.URL.Path, "/stream/")
 	trackID := strings.TrimSuffix(path, "/playlist.m3u8")
-	
-	// Handle case where path might have extra slashes
 	trackID = strings.Trim(trackID, "/")
 
-	// Load track metadata
 	track, err := s.loadTrackMetadata(trackID)
 	if err != nil {
 		log.Printf("Error loading track metadata for %s: %v", trackID, err)
@@ -327,29 +363,24 @@ func (s *StreamingServer) handleMasterPlaylist(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	// Update stats for this track
 	s.mu.Lock()
 	s.stats.TotalStreams++
 	s.stats.TrackStreams[trackID]++
 	s.stats.ActiveStreams++
 	s.mu.Unlock()
 
-	// Set proper headers for M3U8
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Range")
-	w.Header().Set("Cache-Control", "max-age=300") // Cache for 5 minutes
+	w.Header().Set("Cache-Control", "max-age=300")
 
-	// Try to fetch master playlist from S3 first
-	s3Key := fmt.Sprintf("%s/playlist.m3u8", trackID)
+	s3Key := fmt.Sprintf("%s%s/playlist.m3u8", s.s3Prefix, trackID)
 	if data, err := s.fetchFromS3WithSignedURL(s3Key); err == nil {
-		// Fix URLs in the fetched playlist
 		fixedData := s.fixPlaylistURLs(data, trackID, false)
 		w.Write(fixedData)
 		log.Printf("Served master playlist from S3 for track: %s (%s)", track.Title, trackID)
 	} else {
-		// Generate master playlist if not found in S3
 		playlist := s.generateMasterPlaylist(trackID)
 		w.Write([]byte(playlist))
 		log.Printf("Served generated master playlist for track: %s (%s)", track.Title, trackID)
@@ -357,10 +388,9 @@ func (s *StreamingServer) handleMasterPlaylist(w http.ResponseWriter, r *http.Re
 }
 
 func (s *StreamingServer) handleQualityPlaylist(w http.ResponseWriter, r *http.Request) {
-	// Parse URL path: /stream/trackID/quality/playlist.m3u8
 	path := strings.TrimPrefix(r.URL.Path, "/stream/")
 	parts := strings.Split(strings.Trim(path, "/"), "/")
-	
+
 	if len(parts) < 3 {
 		http.Error(w, "Invalid path format", http.StatusBadRequest)
 		return
@@ -368,23 +398,19 @@ func (s *StreamingServer) handleQualityPlaylist(w http.ResponseWriter, r *http.R
 
 	trackID := parts[0]
 	quality := parts[1]
-	// parts[2] should be "playlist.m3u8"
 
-	// Validate quality
 	if quality != "low" && quality != "med" && quality != "high" {
 		http.Error(w, "Invalid quality", http.StatusBadRequest)
 		return
 	}
 
-	// Load track metadata to verify track exists
 	_, err := s.loadTrackMetadata(trackID)
 	if err != nil {
 		http.Error(w, "Track not found", http.StatusNotFound)
 		return
 	}
 
-	// Fetch playlist from S3 using signed URL
-	s3Key := fmt.Sprintf("%s/%s/playlist.m3u8", trackID, quality)
+	s3Key := fmt.Sprintf("%s%s/%s/playlist.m3u8", s.s3Prefix, trackID, quality)
 	data, err := s.fetchFromS3WithSignedURL(s3Key)
 	if err != nil {
 		log.Printf("Error fetching quality playlist from S3: %v", err)
@@ -392,42 +418,37 @@ func (s *StreamingServer) handleQualityPlaylist(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	// Fix segment URLs in the quality playlist
 	fixedData := s.fixSegmentURLs(data, trackID, quality)
 
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Range")
-	w.Header().Set("Cache-Control", "max-age=3600") // Cache for 1 hour
+	w.Header().Set("Cache-Control", "max-age=3600")
 
 	w.Write(fixedData)
 	log.Printf("Served %s quality playlist for track: %s", quality, trackID)
 }
 
-// Fix segment URLs in quality playlists
 func (s *StreamingServer) fixSegmentURLs(content []byte, trackID, quality string) []byte {
 	scanner := bufio.NewScanner(bytes.NewReader(content))
 	var result strings.Builder
-	
+
 	for scanner.Scan() {
 		line := scanner.Text()
-		
-		// Convert relative segment URLs to absolute URLs for our server
+
 		if strings.HasSuffix(line, ".ts") && !strings.HasPrefix(line, "/") {
-			// Convert segment_000.ts to /stream/trackID/quality/segment_000.ts
 			line = fmt.Sprintf("/stream/%s/%s/%s", trackID, quality, line)
 		}
-		
+
 		result.WriteString(line)
 		result.WriteString("\n")
 	}
-	
+
 	return []byte(result.String())
 }
 
 func (s *StreamingServer) handleSegment(w http.ResponseWriter, r *http.Request) {
-	// Rate limiting per IP
 	clientIP := strings.Split(r.RemoteAddr, ":")[0]
 	s.mu.Lock()
 	if lastRequest, exists := s.rateLimiter[clientIP]; exists {
@@ -440,13 +461,11 @@ func (s *StreamingServer) handleSegment(w http.ResponseWriter, r *http.Request) 
 	s.rateLimiter[clientIP] = time.Now()
 	s.mu.Unlock()
 
-	// Clean up rate limiter periodically
 	go s.cleanupRateLimiter()
 
-	// Parse URL path: /stream/trackID/quality/segment.ts
 	path := strings.TrimPrefix(r.URL.Path, "/stream/")
 	parts := strings.Split(strings.Trim(path, "/"), "/")
-	
+
 	if len(parts) < 3 {
 		http.Error(w, "Invalid segment path format", http.StatusBadRequest)
 		return
@@ -456,7 +475,6 @@ func (s *StreamingServer) handleSegment(w http.ResponseWriter, r *http.Request) 
 	quality := parts[1]
 	segmentFile := parts[2]
 
-	// Validate inputs
 	if quality != "low" && quality != "med" && quality != "high" {
 		http.Error(w, "Invalid quality", http.StatusBadRequest)
 		return
@@ -469,30 +487,27 @@ func (s *StreamingServer) handleSegment(w http.ResponseWriter, r *http.Request) 
 
 	cacheKey := fmt.Sprintf("%s/%s/%s", trackID, quality, segmentFile)
 
-	// Check cache first
 	s.mu.RLock()
 	if cachedData, exists := s.segmentCache[cacheKey]; exists {
 		s.mu.RUnlock()
-		
-		// Update stats
+
 		s.mu.Lock()
 		s.stats.CacheHits++
 		s.stats.BandwidthUsage += int64(len(cachedData))
 		s.mu.Unlock()
-		
+
 		w.Header().Set("Content-Type", "video/MP2T")
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Cache-Control", "max-age=86400") // Cache for 24 hours
+		w.Header().Set("Cache-Control", "max-age=86400")
 		w.Header().Set("Accept-Ranges", "bytes")
 		w.Header().Set("Content-Length", strconv.Itoa(len(cachedData)))
-		
+
 		w.Write(cachedData)
 		return
 	}
 	s.mu.RUnlock()
 
-	// Fetch from S3 using signed URL
-	s3Key := fmt.Sprintf("%s/%s/%s", trackID, quality, segmentFile)
+	s3Key := fmt.Sprintf("%s%s/%s/%s", s.s3Prefix, trackID, quality, segmentFile)
 	data, err := s.fetchFromS3WithSignedURL(s3Key)
 	if err != nil {
 		log.Printf("Error fetching segment from S3: %v", err)
@@ -500,13 +515,11 @@ func (s *StreamingServer) handleSegment(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Update stats
 	s.mu.Lock()
 	s.stats.CacheMisses++
 	s.stats.BandwidthUsage += int64(len(data))
 	s.mu.Unlock()
 
-	// Cache the segment if cache isn't full
 	s.mu.Lock()
 	if len(s.segmentCache) < s.maxCacheSize {
 		s.segmentCache[cacheKey] = data
@@ -515,17 +528,132 @@ func (s *StreamingServer) handleSegment(w http.ResponseWriter, r *http.Request) 
 
 	w.Header().Set("Content-Type", "video/MP2T")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Cache-Control", "max-age=86400") // Cache for 24 hours
+	w.Header().Set("Cache-Control", "max-age=86400")
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 
 	w.Write(data)
 }
 
+func (s *StreamingServer) handleDirectFile(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/file/")
+	trackID := strings.Trim(path, "/")
+
+	track, err := s.loadTrackMetadata(trackID)
+	if err != nil {
+		log.Printf("Error loading track metadata for %s: %v", trackID, track)
+		http.Error(w, "Track not found", http.StatusNotFound)
+		return
+	}
+
+	s.mu.Lock()
+	s.stats.TotalStreams++
+	s.stats.TrackStreams[trackID]++
+	s.stats.ActiveStreams++
+	s.mu.Unlock()
+
+	fileExt := "mp3"
+	if ext := r.URL.Query().Get("format"); ext != "" {
+		fileExt = strings.TrimPrefix(ext, ".")
+	}
+
+	s3Key := fmt.Sprintf("%s%s.%s", s.s3RawPrefix, trackID, fileExt)
+
+	exists, err := s.fileExists(s3Key)
+	if err != nil {
+		log.Printf("Error checking file existence for %s: %v", s3Key, err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+	if !exists {
+		s.fallbackToHLS(w, r, trackID)
+		return
+	}
+
+	signedURL, err := s.getSignedURL(s3Key)
+	if err != nil {
+		log.Printf("Error generating signed URL for %s: %v", s3Key, err)
+		http.Error(w, "File not found", http.StatusNotFound)
+		return
+	}
+
+	s.proxyFile(w, r, signedURL, fmt.Sprintf("%s.%s", trackID, fileExt))
+}
+
+func (s *StreamingServer) proxyFile(w http.ResponseWriter, r *http.Request, signedURL, filename string) {
+	req, err := http.NewRequest("GET", signedURL, nil)
+	if err != nil {
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+
+	if rangeHeader := r.Header.Get("Range"); rangeHeader != "" {
+		req.Header.Set("Range", rangeHeader)
+	}
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		http.Error(w, "Failed to fetch file", http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+
+	for k, v := range resp.Header {
+		if strings.HasPrefix(k, "Content-") || k == "Accept-Ranges" || k == "Content-Disposition" {
+			w.Header()[k] = v
+		}
+	}
+
+	if w.Header().Get("Content-Type") == "" {
+		w.Header().Set("Content-Type", getContentTypeByExtension(filename))
+	}
+
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Range")
+
+	w.WriteHeader(resp.StatusCode)
+
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		log.Printf("Error streaming file: %v", err)
+	}
+}
+
+func (s *StreamingServer) fallbackToHLS(w http.ResponseWriter, r *http.Request, trackID string) {
+	hlsMasterKey := fmt.Sprintf("%s%s/playlist.m3u8", s.s3Prefix, trackID)
+	exists, err := s.fileExists(hlsMasterKey)
+	if err != nil {
+		log.Printf("Error checking HLS existence for %s: %v", trackID, err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+
+	if !exists {
+		http.Error(w, "Track not found in either raw or HLS format", http.StatusNotFound)
+		return
+	}
+
+	log.Printf("Falling back to HLS for track %s", trackID)
+
+	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Cache-Control", "max-age=300")
+
+	data, err := s.fetchFromS3WithSignedURL(hlsMasterKey)
+	if err != nil {
+		http.Error(w, "Failed to fetch HLS playlist", http.StatusInternalServerError)
+		return
+	}
+
+	fixedData := s.fixPlaylistURLs(data, trackID, false)
+	w.Write(fixedData)
+}
+
 func (s *StreamingServer) cleanupRateLimiter() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	
+
 	now := time.Now()
 	for ip, lastTime := range s.rateLimiter {
 		if now.Sub(lastTime) > 5*time.Minute {
@@ -537,7 +665,7 @@ func (s *StreamingServer) cleanupRateLimiter() {
 func (s *StreamingServer) cleanupSignedURLCache() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	
+
 	now := time.Now()
 	for key, item := range s.signedURLCache {
 		if now.After(item.expiresAt) {
@@ -549,8 +677,7 @@ func (s *StreamingServer) cleanupSignedURLCache() {
 func (s *StreamingServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
-	
-	// Calculate uptime
+
 	s.mu.RLock()
 	uptime := time.Since(s.stats.StartTime).Round(time.Second)
 	s.mu.RUnlock()
@@ -561,9 +688,9 @@ func (s *StreamingServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"cache_size":         len(s.segmentCache),
 		"tracks_loaded":      len(s.tracks),
 		"signed_urls_cached": len(s.signedURLCache),
-		"uptime":            uptime.String(),
+		"uptime":             uptime.String(),
 	}
-	
+
 	json.NewEncoder(w).Encode(health)
 }
 
@@ -571,7 +698,6 @@ func (s *StreamingServer) handleStats(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 
-	// Calculate uptime
 	s.mu.RLock()
 	stats := s.stats
 	stats.Uptime = time.Since(s.stats.StartTime).Round(time.Second).String()
@@ -603,53 +729,53 @@ func (s *StreamingServer) handleTrackList(w http.ResponseWriter, r *http.Request
 	json.NewEncoder(w).Encode(tracks)
 }
 
-// Middleware for logging and recovery
 func loggingMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		
-		// Recovery from panics
+
 		defer func() {
 			if err := recover(); err != nil {
 				log.Printf("Panic recovered: %v", err)
 				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			}
 		}()
-		
+
 		next.ServeHTTP(w, r)
-		
+
 		duration := time.Since(start)
 		log.Printf("%s %s %v", r.Method, r.URL.Path, duration)
 	})
 }
 
 func main() {
-	// Load environment variables from .env file
 	err := godotenv.Load()
 	if err != nil {
 		log.Printf("Warning: Error loading .env file: %v", err)
 	}
-	
-	// Read AWS configuration from environment
+
 	bucketName := os.Getenv("S3_BUCKET_NAME")
 	if bucketName == "" {
 		log.Fatal("S3_BUCKET_NAME environment variable is required")
 	}
-	
+
 	s3Prefix := os.Getenv("S3_PREFIX")
 	if s3Prefix == "" {
-		s3Prefix = "hls" // Default folder name
+		s3Prefix = "hls"
 	}
-	
+
+	s3RawPrefix := os.Getenv("S3_RAW_PREFIX")
+	if s3RawPrefix == "" {
+		s3RawPrefix = "raw/"
+	}
+
 	awsRegion := os.Getenv("AWS_REGION")
 	if awsRegion == "" {
-		awsRegion = "us-east-1" // Default region
+		awsRegion = "us-east-1"
 	}
-	
+
 	awsAccessKey := os.Getenv("AWS_ACCESS_KEY_ID")
 	awsSecretKey := os.Getenv("AWS_SECRET_ACCESS_KEY")
-	
-	// Validate credentials if provided
+
 	if (awsAccessKey == "") != (awsSecretKey == "") {
 		log.Fatal("Both AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must be provided together, or both omitted to use default credentials")
 	}
@@ -659,12 +785,11 @@ func main() {
 		port = "8080"
 	}
 
-	server, err := NewStreamingServer(bucketName, s3Prefix, awsRegion, awsAccessKey, awsSecretKey)
+	server, err := NewStreamingServer(bucketName, s3Prefix, s3RawPrefix, awsRegion, awsAccessKey, awsSecretKey)
 	if err != nil {
 		log.Fatalf("Failed to create streaming server: %v", err)
 	}
 
-	// Serve static files from the "static" directory
 	staticDir := "./static"
 	if _, err := os.Stat(staticDir); os.IsNotExist(err) {
 		log.Printf("Warning: Static directory '%s' not found, skipping static file serving", staticDir)
@@ -674,7 +799,6 @@ func main() {
 		log.Printf("Serving static files from %s directory", staticDir)
 	}
 
-	// Improved routing with better path matching
 	http.HandleFunc("/stream/", loggingMiddleware(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "OPTIONS" {
 			server.handleCORS(w, r)
@@ -682,21 +806,16 @@ func main() {
 		}
 
 		path := r.URL.Path
-		
-		// Remove /stream/ prefix and clean up path
 		streamPath := strings.TrimPrefix(path, "/stream/")
 		streamPath = strings.Trim(streamPath, "/")
 		parts := strings.Split(streamPath, "/")
 
 		switch {
 		case len(parts) == 2 && parts[1] == "playlist.m3u8":
-			// Master playlist: /stream/trackID/playlist.m3u8
 			server.handleMasterPlaylist(w, r)
 		case len(parts) == 3 && parts[2] == "playlist.m3u8":
-			// Quality playlist: /stream/trackID/quality/playlist.m3u8
 			server.handleQualityPlaylist(w, r)
 		case len(parts) == 3 && strings.HasSuffix(parts[2], ".ts"):
-			// Segment: /stream/trackID/quality/segment.ts
 			server.handleSegment(w, r)
 		default:
 			log.Printf("Invalid stream path: %s (parts: %v)", path, parts)
@@ -704,22 +823,28 @@ func main() {
 		}
 	}))
 
+	http.HandleFunc("/file/", loggingMiddleware(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "OPTIONS" {
+			server.handleCORS(w, r)
+			return
+		}
+		server.handleDirectFile(w, r)
+	}))
+
 	http.HandleFunc("/health", loggingMiddleware(server.handleHealth))
 	http.HandleFunc("/stats", loggingMiddleware(server.handleStats))
 	http.HandleFunc("/tracks", loggingMiddleware(server.handleTrackList))
 
-	// Start background cleanup routines
 	go func() {
 		ticker := time.NewTicker(5 * time.Minute)
 		defer ticker.Stop()
-		
+
 		for range ticker.C {
 			server.cleanupRateLimiter()
 			server.cleanupSignedURLCache()
-			
-			// Update active streams count (simplistic approach - in real app you'd track individual streams)
+
 			server.mu.Lock()
-			server.stats.ActiveStreams = server.stats.ActiveStreams / 2 // Halve active streams periodically
+			server.stats.ActiveStreams = server.stats.ActiveStreams / 2
 			if server.stats.ActiveStreams < 0 {
 				server.stats.ActiveStreams = 0
 			}
@@ -729,14 +854,16 @@ func main() {
 
 	log.Printf("🚀 Production Audio Streaming Server starting on port %s", port)
 	log.Printf("☁️  AWS S3 Bucket: %s (Private with Signed URLs)", bucketName)
-	log.Printf("📁 S3 Prefix: %s/", s3Prefix)
+	log.Printf("📁 HLS Prefix: %s/", s3Prefix)
+	log.Printf("📁 Raw Prefix: %s", s3RawPrefix)
 	log.Printf("🌍 AWS Region: %s", awsRegion)
 	if awsAccessKey != "" {
 		log.Printf("🔑 Using AWS credentials from environment variables")
 	} else {
 		log.Printf("🔑 Using default AWS credentials (IAM role/profile)")
 	}
-	log.Printf("🎵 Stream URL format: http://localhost:%s/stream/TRACK_ID/playlist.m3u8", port)
+	log.Printf("🎵 HLS Stream URL format: http://localhost:%s/stream/TRACK_ID/playlist.m3u8", port)
+	log.Printf("🎵 Direct File URL format: http://localhost:%s/file/TRACK_ID", port)
 	log.Printf("❤️  Health check: http://localhost:%s/health", port)
 	log.Printf("📊 Stats: http://localhost:%s/stats", port)
 	log.Printf("🎶 Track list: http://localhost:%s/tracks", port)
