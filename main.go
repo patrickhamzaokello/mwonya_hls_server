@@ -552,7 +552,7 @@ func (s *StreamingServer) handleDirectFile(w http.ResponseWriter, r *http.Reques
 	s.stats.ActiveStreams++
 	s.mu.Unlock()
 
-	fileExt := "mp3"
+	fileExt := "ogg"
 	if ext := r.URL.Query().Get("format"); ext != "" {
 		fileExt = strings.TrimPrefix(ext, ".")
 	}
