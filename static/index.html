@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Audio Streaming Server Dashboard</title>
+    <title>Mwonya Audio Streaming Dashboard</title>
     <style>
         * {
             margin: 0;
@@ -11,210 +11,211 @@
             box-sizing: border-box;
         }
 
+        :root {
+            --primary: #2563eb;
+            --text: #1f2937;
+            --text-light: #6b7280;
+            --border: #e5e7eb;
+            --bg: #ffffff;
+            --bg-light: #f9fafb;
+            --success: #10b981;
+            --radius: 8px;
+        }
+
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-            background: #fafafa;
-            color: #333;
-            line-height: 1.6;
+            background: var(--bg-light);
+            color: var(--text);
+            line-height: 1.5;
         }
 
         .container {
             max-width: 1200px;
             margin: 0 auto;
-            padding: 40px 20px;
+            padding: 2rem;
         }
 
+        /* Header */
         .header {
-            margin-bottom: 60px;
+            margin-bottom: 3rem;
         }
 
         .header h1 {
-            font-size: 1.8rem;
-            font-weight: 400;
-            color: #111;
-            margin-bottom: 8px;
-            letter-spacing: -0.02em;
+            font-size: 1.875rem;
+            font-weight: 600;
+            color: var(--text);
+            margin-bottom: 0.5rem;
         }
 
-        .header .status {
-            font-size: 0.9rem;
-            color: #666;
+        .status {
             display: flex;
             align-items: center;
-            gap: 8px;
+            gap: 0.5rem;
+            color: var(--text-light);
+            font-size: 0.875rem;
         }
 
         .status-dot {
             width: 6px;
             height: 6px;
-            background: #111;
+            background: var(--success);
             border-radius: 50%;
         }
 
+        /* Stats Grid */
         .stats-grid {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-            gap: 1px;
-            background: #e0e0e0;
-            border: 1px solid #e0e0e0;
-            margin-bottom: 60px;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 1rem;
+            margin-bottom: 3rem;
         }
 
         .stat-card {
-            background: white;
-            padding: 32px 24px;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            padding: 1.5rem;
             text-align: center;
-            transition: background-color 0.2s ease;
-        }
-
-        .stat-card:hover {
-            background: #f8f8f8;
         }
 
         .stat-value {
-            font-size: 1.8rem;
-            font-weight: 300;
-            color: #111;
-            margin-bottom: 8px;
-            letter-spacing: -0.02em;
+            font-size: 2rem;
+            font-weight: 600;
+            color: var(--text);
+            margin-bottom: 0.25rem;
         }
 
         .stat-label {
-            font-size: 0.8rem;
-            color: #666;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
+            font-size: 0.875rem;
+            color: var(--text-light);
             font-weight: 500;
         }
 
+        /* Tracks Section */
         .tracks-section {
-            background: white;
-            border: 1px solid #e0e0e0;
+            background: var(--bg);
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            overflow: hidden;
         }
 
         .section-header {
-            padding: 32px 32px 24px;
-            border-bottom: 1px solid #f0f0f0;
+            padding: 1.5rem;
+            border-bottom: 1px solid var(--border);
         }
 
         .section-title {
-            font-size: 1.2rem;
-            font-weight: 400;
-            color: #111;
-            margin-bottom: 4px;
-            letter-spacing: -0.01em;
+            font-size: 1.25rem;
+            font-weight: 600;
+            color: var(--text);
+            margin-bottom: 0.25rem;
         }
 
         .section-subtitle {
-            font-size: 0.85rem;
-            color: #666;
+            font-size: 0.875rem;
+            color: var(--text-light);
         }
 
+        /* Search */
         .search-container {
-            padding: 0 32px 24px;
-            border-bottom: 1px solid #f0f0f0;
+            padding: 1.5rem;
+            border-bottom: 1px solid var(--border);
         }
 
         .search-input {
             width: 100%;
-            padding: 12px 0;
-            border: none;
-            border-bottom: 1px solid #e0e0e0;
-            font-size: 0.95rem;
-            background: transparent;
-            transition: border-color 0.2s ease;
+            padding: 0.75rem;
+            border: 1px solid var(--border);
+            border-radius: var(--radius);
+            font-size: 0.875rem;
+            background: var(--bg);
+            transition: border-color 0.2s;
         }
 
         .search-input:focus {
             outline: none;
-            border-bottom-color: #111;
+            border-color: var(--primary);
         }
 
         .search-input::placeholder {
-            color: #999;
+            color: var(--text-light);
         }
 
+        /* Table */
         .tracks-table {
             width: 100%;
             border-collapse: collapse;
         }
 
         .tracks-table th {
-            padding: 20px 32px;
+            padding: 1rem 1.5rem;
             text-align: left;
             font-weight: 500;
-            color: #666;
-            font-size: 0.8rem;
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            background: #fafafa;
-            border-bottom: 1px solid #f0f0f0;
+            color: var(--text-light);
+            font-size: 0.875rem;
+            background: var(--bg-light);
+            border-bottom: 1px solid var(--border);
         }
 
         .tracks-table td {
-            padding: 20px 32px;
-            border-bottom: 1px solid #f8f8f8;
+            padding: 1rem 1.5rem;
+            border-bottom: 1px solid var(--border);
             vertical-align: middle;
         }
 
-        .tracks-table tbody tr {
-            transition: background-color 0.1s ease;
-        }
-
         .tracks-table tbody tr:hover {
-            background: #fafafa;
+            background: var(--bg-light);
         }
 
         .track-id {
-            font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
-            font-size: 0.8rem;
-            color: #666;
-            background: #f5f5f5;
-            padding: 2px 6px;
-            border-radius: 2px;
+            font-family: ui-monospace, 'SF Mono', monospace;
+            font-size: 0.8125rem;
+            color: var(--text-light);
+            background: var(--bg-light);
+            padding: 0.25rem 0.5rem;
+            border-radius: 4px;
         }
 
         .track-title {
-            font-weight: 400;
-            color: #111;
-            margin-bottom: 2px;
-            font-size: 0.95rem;
+            font-weight: 500;
+            color: var(--text);
+            margin-bottom: 0.125rem;
         }
 
         .track-artist {
-            color: #666;
-            font-size: 0.85rem;
+            color: var(--text-light);
+            font-size: 0.875rem;
         }
 
         .track-duration {
-            font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
-            font-size: 0.85rem;
-            color: #666;
+            font-family: ui-monospace, 'SF Mono', monospace;
+            font-size: 0.875rem;
+            color: var(--text-light);
         }
 
         .stream-count {
-            font-weight: 400;
-            color: #111;
-            font-size: 0.95rem;
+            font-weight: 500;
+            color: var(--text);
         }
 
-        .loading {
+        /* Loading and states */
+        .loading,
+        .empty-state,
+        .error-state {
             text-align: center;
-            padding: 60px;
-            color: #999;
-            font-size: 0.9rem;
+            padding: 3rem 1.5rem;
+            color: var(--text-light);
         }
 
         .spinner {
             display: inline-block;
-            width: 16px;
-            height: 16px;
-            border: 1px solid #f0f0f0;
-            border-top: 1px solid #111;
+            width: 20px;
+            height: 20px;
+            border: 2px solid var(--border);
+            border-top: 2px solid var(--primary);
             border-radius: 50%;
             animation: spin 1s linear infinite;
-            margin-right: 12px;
-            vertical-align: middle;
+            margin-right: 0.5rem;
         }
 
         @keyframes spin {
@@ -222,53 +223,49 @@
             100% { transform: rotate(360deg); }
         }
 
-        .empty-state {
-            text-align: center;
-            padding: 60px;
-            color: #999;
-            font-size: 0.9rem;
-        }
-
-        .error-state {
-            text-align: center;
-            padding: 60px;
-            color: #666;
-            font-size: 0.9rem;
-        }
-
+        /* Responsive */
         @media (max-width: 768px) {
             .container {
-                padding: 20px 15px;
+                padding: 1rem;
             }
 
             .header {
-                margin-bottom: 40px;
+                margin-bottom: 2rem;
+            }
+
+            .header h1 {
+                font-size: 1.5rem;
             }
 
             .stats-grid {
                 grid-template-columns: repeat(2, 1fr);
-                margin-bottom: 40px;
+                gap: 0.75rem;
+                margin-bottom: 2rem;
             }
 
             .stat-card {
-                padding: 24px 16px;
-            }
-
-            .section-header {
-                padding: 24px 20px 20px;
-            }
-
-            .search-container {
-                padding: 0 20px 20px;
-            }
-
-            .tracks-table th,
-            .tracks-table td {
-                padding: 16px 20px;
+                padding: 1rem;
             }
 
             .stat-value {
                 font-size: 1.5rem;
+            }
+
+            .section-header {
+                padding: 1rem;
+            }
+
+            .search-container {
+                padding: 1rem;
+            }
+
+            .tracks-table th,
+            .tracks-table td {
+                padding: 0.75rem 1rem;
+            }
+
+            .section-title {
+                font-size: 1.125rem;
             }
         }
 
@@ -276,13 +273,40 @@
             .stats-grid {
                 grid-template-columns: 1fr;
             }
+
+            .tracks-table th:nth-child(1),
+            .tracks-table td:nth-child(1) {
+                display: none;
+            }
+
+            .tracks-table th,
+            .tracks-table td {
+                padding: 0.75rem 0.5rem;
+            }
+        }
+
+        /* Clean focus styles */
+        button:focus,
+        input:focus {
+            outline: 2px solid var(--primary);
+            outline-offset: 2px;
+        }
+
+        /* Subtle animations */
+        .stat-card,
+        .tracks-table tbody tr {
+            transition: all 0.15s ease;
+        }
+
+        .stat-card:hover {
+            border-color: var(--primary);
         }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="header">
-            <h1>Mwonya Audio Streaming Dashboard</h1>
+            <h1>Mwonya Audio Streaming</h1>
             <div class="status">
                 <div class="status-dot"></div>
                 <span>Server Online</span>
@@ -344,7 +368,7 @@
                     <tr>
                         <td colspan="4" class="loading">
                             <div class="spinner"></div>
-                            Loading...
+                            Loading tracks...
                         </td>
                     </tr>
                 </tbody>
@@ -451,7 +475,7 @@
         loadStats();
         loadTracks();
         setInterval(loadStats, 5000);
-        setInterval(loadTracks, 5000);
+        setInterval(loadTracks, 30000);
     </script>
 </body>
 </html>
