@@ -541,7 +541,7 @@ func (s *StreamingServer) handleDirectFile(w http.ResponseWriter, r *http.Reques
 
 	track, err := s.loadTrackMetadata(trackID)
 	if err != nil {
-		log.Printf("Error loading track metadata for %s: %v", trackID, track)
+		log.Printf("Error loading track metadata for %s : %s: %v", trackID,track, err)
 		http.Error(w, "Track not found", http.StatusNotFound)
 		return
 	}
@@ -557,26 +557,45 @@ func (s *StreamingServer) handleDirectFile(w http.ResponseWriter, r *http.Reques
 		fileExt = strings.TrimPrefix(ext, ".")
 	}
 
-	s3Key := fmt.Sprintf("%s%s.%s", s.s3RawPrefix, trackID, fileExt)
+	// Try multiple S3 key patterns to find the file
+	var s3Keys []string
+	
+	// Pattern 1: Your current nested structure - trackID/trackID.ext
+	s3Keys = append(s3Keys, fmt.Sprintf("%s%s/%s.%s", s.s3RawPrefix, trackID, trackID, fileExt))	
+	
 
-	exists, err := s.fileExists(s3Key)
-	if err != nil {
-		log.Printf("Error checking file existence for %s: %v", s3Key, err)
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-		return
+	var validS3Key string
+	var exists bool
+	var checkErr error
+
+	// Try each pattern until we find an existing file
+	for _, s3Key := range s3Keys {
+		exists, checkErr = s.fileExists(s3Key)
+		if checkErr != nil {
+			log.Printf("Error checking file existence for %s: %v", s3Key, checkErr)
+			continue
+		}
+		if exists {
+			validS3Key = s3Key
+			break
+		}
 	}
-	if !exists {
+
+	if !exists || validS3Key == "" {
+		log.Printf("File not found in any expected location for trackID: %s", trackID)
+		log.Printf("Tried keys: %v", s3Keys)
 		s.fallbackToHLS(w, r, trackID)
 		return
 	}
 
-	signedURL, err := s.getSignedURL(s3Key)
+	signedURL, err := s.getSignedURL(validS3Key)
 	if err != nil {
-		log.Printf("Error generating signed URL for %s: %v", s3Key, err)
+		log.Printf("Error generating signed URL for %s: %v", validS3Key, err)
 		http.Error(w, "File not found", http.StatusNotFound)
 		return
 	}
 
+	log.Printf("Successfully found file at: %s", validS3Key)
 	s.proxyFile(w, r, signedURL, fmt.Sprintf("%s.%s", trackID, fileExt))
 }
 
@@ -854,7 +873,7 @@ func main() {
 
 	log.Printf("🚀 Production Audio Streaming Server starting on port %s", port)
 	log.Printf("☁️  AWS S3 Bucket: %s (Private with Signed URLs)", bucketName)
-	log.Printf("📁 HLS Prefix: %s/", s3Prefix)
+	log.Printf("📁 HLS Prefix: %s", s3Prefix)
 	log.Printf("📁 Raw Prefix: %s", s3RawPrefix)
 	log.Printf("🌍 AWS Region: %s", awsRegion)
 	if awsAccessKey != "" {
