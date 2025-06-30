@@ -962,7 +962,7 @@ func logServerInfo(config *serverConfig, server *StreamingServer) {
 		log.Printf("🔑 Using default AWS credentials (IAM role/profile)")
 	}
 	log.Printf("🎵 HLS Stream URL format: http://localhost:%s/stream/TRACK_ID/playlist.m3u8", config.port)
-	log.Printf("🎵 Direct File URL format: http://localhost:%s/file/TRACK_ID", config.port)
+	log.Printf("🎵 Directs File URL format: http://localhost:%s/file/TRACK_ID", config.port)
 	log.Printf("❤️  Health check: http://localhost:%s/health", config.port)
 	log.Printf("📊 Stats: http://localhost:%s/stats", config.port)
 	log.Printf("🎶 Track list: http://localhost:%s/tracks", config.port)
