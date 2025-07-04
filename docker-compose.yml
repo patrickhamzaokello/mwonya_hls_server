@@ -6,6 +6,8 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: audio-streaming-server
+    volumes:
+      - /home/pk/mwonya_assets:/app/mwonya_assets #mount assets
     ports:
       - "5010:5010"
     environment:
