@@ -432,7 +432,6 @@ func (s *StreamingServer) handleMasterPlaylist(w http.ResponseWriter, r *http.Re
 
 	s.updateStats(trackID)
 
-	setCommonHeaders(w)
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.Header().Set("Cache-Control", "max-age=300")
 
@@ -456,11 +455,6 @@ func (s *StreamingServer) updateStats(trackID string) {
 	s.stats.ActiveStreams++
 }
 
-func setCommonHeaders(w http.ResponseWriter) {
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
-	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Range")
-}
 
 func (s *StreamingServer) handleQualityPlaylist(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/stream/")
@@ -497,7 +491,6 @@ func (s *StreamingServer) handleQualityPlaylist(w http.ResponseWriter, r *http.R
 
 	fixedData := s.fixSegmentURLs(data, trackID, quality)
 
-	setCommonHeaders(w)
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.Header().Set("Cache-Control", "max-age=3600")
 
@@ -674,7 +667,6 @@ func (s *StreamingServer) fallbackToHLS(w http.ResponseWriter, r *http.Request, 
 
 	log.Printf("Falling back to HLS for track %s", trackID)
 
-	setCommonHeaders(w)
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.Header().Set("Cache-Control", "max-age=300")
 
@@ -689,7 +681,6 @@ func (s *StreamingServer) fallbackToHLS(w http.ResponseWriter, r *http.Request, 
 }
 
 func (s *StreamingServer) handleHealth(w http.ResponseWriter, r *http.Request) {
-	setCommonHeaders(w)
 	w.Header().Set("Content-Type", "application/json")
 
 	s.statsMu.RLock()
@@ -716,7 +707,6 @@ func syncMapLen(m *sync.Map) int {
 }
 
 func (s *StreamingServer) handleStats(w http.ResponseWriter, r *http.Request) {
-	setCommonHeaders(w)
 	w.Header().Set("Content-Type", "application/json")
 
 	s.statsMu.RLock()
@@ -728,13 +718,11 @@ func (s *StreamingServer) handleStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *StreamingServer) handleCORS(w http.ResponseWriter, r *http.Request) {
-	setCommonHeaders(w)
 	w.Header().Set("Access-Control-Max-Age", "86400")
 	w.WriteHeader(http.StatusOK)
 }
 
 func (s *StreamingServer) handleTrackList(w http.ResponseWriter, r *http.Request) {
-	setCommonHeaders(w)
 	w.Header().Set("Content-Type", "application/json")
 
 	tracks := make([]*AudioTrack, 0)
