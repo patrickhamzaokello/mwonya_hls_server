@@ -567,7 +567,6 @@ func (s *StreamingServer) updateBandwidthStats(size int, isCacheHit bool) {
 
 func serveSegment(w http.ResponseWriter, data []byte) {
 	w.Header().Set("Content-Type", "video/MP2T")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Cache-Control", "max-age=86400")
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
