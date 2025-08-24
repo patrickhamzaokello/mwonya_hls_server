@@ -16,8 +16,8 @@ logger = logging.getLogger(__name__)
 class AudioProcessor:
     def __init__(self, 
                  raw_dir='/mnt/HC_Volume_103173495/mwonya_assets/raw',
-                 output_dir='/mnt/HC_Volume_103173495/hls_output/',
-                 failed_dir='/mnt/HC_Volume_103173495/failed/',
+                 output_dir='/mnt/HC_Volume_103173495/mwonya_assets/hls_output/',
+                 failed_dir='/mnt/HC_Volume_103173495/mwonya_assets/failed/',
                  segment_duration=4):
         """Initialize AudioProcessor with file paths and settings."""
         self.raw_dir = raw_dir.rstrip('/')
