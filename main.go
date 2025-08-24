@@ -22,12 +22,12 @@ import (
 const (
 	DefaultCacheSize          = 10000
 	DefaultCacheExpiry        = 2 * time.Hour
-	DefaultRateLimitWindow    = 500 * time.Millisecond // Reduced to 0.5s for flexibility
+	DefaultRateLimitWindow    = 1000 * time.Millisecond // Reduced to 0.5s for flexibility
 	DefaultCleanupInterval    = 5 * time.Minute
 	DefaultPort               = "8080"
-	PrecacheSegmentCount      = 5 // Reduced to 5 segments (20 seconds)
+	PrecacheSegmentCount      = 10 // Reduced to 5 segments (20 seconds)
 	DefaultRequestLimit       = 10 // Max requests per window
-	DefaultBurstLimit         = 5  // Extra requests allowed
+	DefaultBurstLimit         = 20  // Extra requests allowed
 )
 
 type AudioTrack struct {
