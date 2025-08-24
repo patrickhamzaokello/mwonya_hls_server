@@ -257,12 +257,13 @@ class AudioProcessor:
 
     def _move_to_failed(self, raw_path):
         """Move failed file to failed directory."""
-        try:
-            failed_path = os.path.join(self.failed_dir, os.path.basename(raw_path))
-            shutil.move(raw_path, failed_path)
-            logger.info(f"Moved failed file to {failed_path}")
-        except Exception as e:
-            logger.error(f"Failed to move {raw_path} to failed directory: {str(e)}")
+        logger.info(f"Keeping raw file {raw_path} in place despite failure")
+        # try:
+        #     failed_path = os.path.join(self.failed_dir, os.path.basename(raw_path))
+        #     shutil.move(raw_path, failed_path)
+        #     logger.info(f"Moved failed file to {failed_path}")
+        # except Exception as e:
+        #     logger.error(f"Failed to move {raw_path} to failed directory: {str(e)}")
 
     def process_all_files(self):
         """Process all audio files in the raw directory."""
