@@ -324,21 +324,10 @@ func (s *StreamingServer) loadTrackMetadata(trackID string) (*AudioTrack, error)
 }
 
 func (s *StreamingServer) loadTrackFromFiles(trackID string) (*AudioTrack, error) {
-	// Try HLS location first
+	// Check HLS location for metadata
 	metadataKey := fmt.Sprintf("%s%s/metadata.json", s.hlsPrefix, trackID)
 
 	data, err := s.fileHandler.ReadFile(metadataKey)
-	if err == nil {
-		var track AudioTrack
-		if err := json.Unmarshal(data, &track); err != nil {
-			return nil, fmt.Errorf("failed to decode metadata: %v", err)
-		}
-		return &track, nil
-	}
-
-	// Try raw location (using raw/metadata/<trackID>.json for flat structure)
-	metadataKey = fmt.Sprintf("%smetadata/%s.json", s.rawPrefix, trackID)
-	data, err = s.fileHandler.ReadFile(metadataKey)
 	if err == nil {
 		var track AudioTrack
 		if err := json.Unmarshal(data, &track); err != nil {
@@ -627,13 +616,19 @@ func getFileExtension(r *http.Request) string {
 	if ext := r.URL.Query().Get("format"); ext != "" {
 		return strings.TrimPrefix(ext, ".")
 	}
-	return "m4a"
+	return "m4a" // Default to m4a
 }
 
 func findExistingFile(s *StreamingServer, trackID, fileExt string) string {
-	// Check only for raw/<trackID>.<format> (flat structure)
-	key := fmt.Sprintf("%s%s.%s", s.rawPrefix, trackID, fileExt)
+	// Check hls/<trackID>/<trackID>.<format> for direct playback
+	key := fmt.Sprintf("%s%s/%s.%s", s.hlsPrefix, trackID, trackID, fileExt)
 	exists, err := s.fileHandler.FileExists(key)
+	if err == nil && exists {
+		return key
+	}
+	// Fallback to raw/<trackID>.<format> if specified format not found in hls/
+	key = fmt.Sprintf("%s%s.%s", s.rawPrefix, trackID, fileExt)
+	exists, err = s.fileHandler.FileExists(key)
 	if err == nil && exists {
 		return key
 	}
@@ -926,7 +921,7 @@ func logServerInfo(config *serverConfig, server *StreamingServer) {
 	log.Printf("📁 HLS Prefix: %s", config.hlsPrefix)
 	log.Printf("📁 Raw Prefix: %s", config.rawPrefix)
 	log.Printf("🎵 HLS Stream URL format: http://localhost:%s/stream/TRACK_ID/playlist.m3u8", config.port)
-	log.Printf("🎵 Direct File URL format: http://localhost:%s/file/TRACK_ID?format=mp3", config.port)
+	log.Printf("🎵 Direct File URL format: http://localhost:%s/file/TRACK_ID (defaults to hls/TRACK_ID/TRACK_ID.m4a, or ?format=<ext>)", config.port)
 	log.Printf("📁 Assets URL format: http://localhost:%s/assets/<path>", config.port)
 	log.Printf("📤 Upload URL: http://localhost:%s/upload (POST with 'file' and optional 'path'; saves to %s/<path> or %s/<filename>)", config.port, config.localAssetsPath, config.localAssetsPath)
 	log.Printf("❤️  Health check: http://localhost:%s/health", config.port)
