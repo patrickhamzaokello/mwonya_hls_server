@@ -336,8 +336,8 @@ func (s *StreamingServer) loadTrackFromFiles(trackID string) (*AudioTrack, error
 		return &track, nil
 	}
 
-	// Try raw location if not found in HLS
-	metadataKey = fmt.Sprintf("%s%s/metadata.json", s.rawPrefix, trackID)
+	// Try raw location (using raw/metadata/<trackID>.json for flat structure)
+	metadataKey = fmt.Sprintf("%smetadata/%s.json", s.rawPrefix, trackID)
 	data, err = s.fileHandler.ReadFile(metadataKey)
 	if err == nil {
 		var track AudioTrack
@@ -631,16 +631,11 @@ func getFileExtension(r *http.Request) string {
 }
 
 func findExistingFile(s *StreamingServer, trackID, fileExt string) string {
-	possibleKeys := []string{
-		fmt.Sprintf("%s%s/%s.%s", s.rawPrefix, trackID, trackID, fileExt),
-		fmt.Sprintf("%s%s.%s", s.rawPrefix, trackID, fileExt),
-	}
-
-	for _, key := range possibleKeys {
-		exists, err := s.fileHandler.FileExists(key)
-		if err == nil && exists {
-			return key
-		}
+	// Check only for raw/<trackID>.<format> (flat structure)
+	key := fmt.Sprintf("%s%s.%s", s.rawPrefix, trackID, fileExt)
+	exists, err := s.fileHandler.FileExists(key)
+	if err == nil && exists {
+		return key
 	}
 	return ""
 }
@@ -931,9 +926,9 @@ func logServerInfo(config *serverConfig, server *StreamingServer) {
 	log.Printf("📁 HLS Prefix: %s", config.hlsPrefix)
 	log.Printf("📁 Raw Prefix: %s", config.rawPrefix)
 	log.Printf("🎵 HLS Stream URL format: http://localhost:%s/stream/TRACK_ID/playlist.m3u8", config.port)
-	log.Printf("🎵 Direct File URL format: http://localhost:%s/file/TRACK_ID", config.port)
+	log.Printf("🎵 Direct File URL format: http://localhost:%s/file/TRACK_ID?format=mp3", config.port)
 	log.Printf("📁 Assets URL format: http://localhost:%s/assets/<path>", config.port)
-	log.Printf("📤 Upload URL: http://localhost:%s/upload (POST with 'file' and optional 'path')", config.port)
+	log.Printf("📤 Upload URL: http://localhost:%s/upload (POST with 'file' and optional 'path'; saves to %s/<path> or %s/<filename>)", config.port, config.localAssetsPath, config.localAssetsPath)
 	log.Printf("❤️  Health check: http://localhost:%s/health", config.port)
 	log.Printf("📊 Stats: http://localhost:%s/stats", config.port)
 	log.Printf("🎶 Track list: http://localhost:%s/tracks", config.port)
