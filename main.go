@@ -203,7 +203,7 @@ func (rl *RateLimiter) Cleanup() {
 
 	now := time.Now()
 	for ip, last := range rl.visits {
-		if now.Sub(last) > 5*time.Minute {
+		if len(times) == 0 || now.Sub(times[len(times)-1]) > 5*time.Minute {
 			delete(rl.visits, ip)
 		}
 	}
