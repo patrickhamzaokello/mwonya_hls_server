@@ -695,10 +695,6 @@ func (s *StreamingServer) handleStats(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(stats)
 }
 
-func (s *StreamingServer) handleCORS(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Access-Control-Max-Age", "86400")
-	w.WriteHeader(http.StatusOK)
-}
 
 func (s *StreamingServer) handleTrackList(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
@@ -858,11 +854,6 @@ func serveStaticFiles(staticDir string) {
 
 func setupRoutes(server *StreamingServer) {
 	http.HandleFunc("/stream/", loggingMiddleware(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "OPTIONS" {
-			server.handleCORS(w, r)
-			return
-		}
-
 		path := r.URL.Path
 		streamPath := strings.TrimPrefix(path, "/stream/")
 		streamPath = strings.Trim(streamPath, "/")
@@ -882,10 +873,6 @@ func setupRoutes(server *StreamingServer) {
 	}))
 
 	http.HandleFunc("/file/", loggingMiddleware(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == "OPTIONS" {
-			server.handleCORS(w, r)
-			return
-		}
 		server.handleDirectFile(w, r)
 	}))
 
