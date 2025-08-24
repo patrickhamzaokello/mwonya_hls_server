@@ -267,7 +267,7 @@ func NewStreamingServer(hlsPrefix, rawPrefix, localPath string) (*StreamingServe
 		hlsPrefix:       hlsPrefix,
 		rawPrefix:       rawPrefix,
 		segmentCache:    NewLRUCache(DefaultCacheSize),
-		rateLimiter:     NewRateLimiter(DefaultRateLimitWindow,DefaultRequestLimit, DefaultBurstLimit, DefaultCleanupInterval),
+		rateLimiter:     NewRateLimiter(DefaultRateLimitWindow,DefaultRequestLimit, DefaultBurstLimit, DefaultCleanupInterval,),
 		maxCacheSize:    DefaultCacheSize,
 		cacheExpiry:     DefaultCacheExpiry,
 		stats: &StreamingStats{
