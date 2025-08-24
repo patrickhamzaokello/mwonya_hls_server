@@ -108,7 +108,7 @@ class AudioProcessor:
         """Normalize audio loudness to -14 LUFS."""
         try:
             original_ext = os.path.splitext(input_path)[1].lower()
-            normalized_path = f"{input_path}_normalized{original_ext}"
+            normalized_path = f"/tmp/{os.path.basename(input_path)}_normalized{original_ext}"
             (
                 ffmpeg.input(input_path)
                 .filter('loudnorm', I=self.target_loudness, LRA=11, TP=-1.5)
@@ -116,7 +116,7 @@ class AudioProcessor:
                 .overwrite_output()
                 .run(quiet=True)
             )
-            logger.info(f"Normalized {input_path}")
+            logger.info(f"Normalized {input_path} to {normalized_path}")
             return normalized_path
         except ffmpeg.Error as e:
             logger.error(f"Normalization failed: {e.stderr.decode('utf8')}")
