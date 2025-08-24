@@ -22,7 +22,7 @@ import (
 const (
 	DefaultCacheSize          = 10000
 	DefaultCacheExpiry        = 2 * time.Hour
-	DefaultRateLimitWindow    = 100 * time.Millisecond
+	DefaultRateLimitWindow    = 500 * time.Millisecond
 	DefaultCleanupInterval    = 5 * time.Minute
 	DefaultPort               = "8080"
 	PrecacheSegmentCount      = 10
