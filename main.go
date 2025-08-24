@@ -149,22 +149,27 @@ func (rl *RateLimiter) startCleanup() {
 	ticker := time.NewTicker(rl.cleanup)
 	defer ticker.Stop()
 	for range ticker.C {
-		rl.mutex.Lock()
-		for key, times := range rl.visits {
-			now := time.Now()
-			var validTimes []time.Time
-			for _, t := range times {
-				if now.Sub(t) <= rl.window {
-					validTimes = append(validTimes, t)
-				}
-			}
-			if len(validTimes) == 0 {
-				delete(rl.visits, key)
-			} else {
-				rl.visits[key] = validTimes
+		rl.Cleanup()
+	}
+}
+
+func (rl *RateLimiter) Cleanup() {
+	rl.mutex.Lock()
+	defer rl.mutex.Unlock()
+
+	now := time.Now()
+	for ip, times := range rl.visits {
+		var validTimes []time.Time
+		for _, t := range times {
+			if now.Sub(t) <= rl.window {
+				validTimes = append(validTimes, t)
 			}
 		}
-		rl.mutex.Unlock()
+		if len(validTimes) == 0 {
+			delete(rl.visits, ip)
+		} else {
+			rl.visits[ip] = validTimes
+		}
 	}
 }
 
@@ -197,17 +202,6 @@ func (rl *RateLimiter) Allow(key string) bool {
 	return true
 }
 
-func (rl *RateLimiter) Cleanup() {
-	rl.mutex.Lock()
-	defer rl.mutex.Unlock()
-
-	now := time.Now()
-	for ip := range rl.visits {
-		if len(times) == 0 || now.Sub(times[len(times)-1]) > 5*time.Minute {
-			delete(rl.visits, ip)
-		}
-	}
-}
 
 func NewLRUCache(maxSize int) *LRUCache {
 	return &LRUCache{
