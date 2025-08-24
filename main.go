@@ -22,10 +22,12 @@ import (
 const (
 	DefaultCacheSize          = 10000
 	DefaultCacheExpiry        = 2 * time.Hour
-	DefaultRateLimitWindow    = 1000 * time.Millisecond
+	DefaultRateLimitWindow    = 500 * time.Millisecond // Reduced to 0.5s for flexibility
 	DefaultCleanupInterval    = 5 * time.Minute
 	DefaultPort               = "8080"
-	PrecacheSegmentCount      = 10
+	PrecacheSegmentCount      = 5 // Reduced to 5 segments (20 seconds)
+	DefaultRequestLimit       = 10 // Max requests per window
+	DefaultBurstLimit         = 5  // Extra requests allowed
 )
 
 type AudioTrack struct {
@@ -79,9 +81,12 @@ type cacheItem struct {
 }
 
 type RateLimiter struct {
-	visits map[string]time.Time
-	mu     sync.Mutex
-	window time.Duration
+	visits  map[string][]time.Time
+	window  time.Duration
+	limit   int           // Max requests per window
+	burst   int           // Extra requests allowed
+	mutex   sync.Mutex    // For thread-safe access
+	cleanup time.Duration // Interval to clean expired visits
 }
 
 func NewLocalFileHandler(basePath string) *LocalFileHandler {
@@ -128,30 +133,73 @@ func (l *LocalFileHandler) ListFiles(prefix string) ([]string, error) {
 	return files, err
 }
 
-func NewRateLimiter(window time.Duration) *RateLimiter {
-	return &RateLimiter{
-		visits: make(map[string]time.Time),
-		window: window,
+func NewRateLimiter(window time.Duration, limit int, burst int, cleanupInterval time.Duration) *RateLimiter {
+	rl := &RateLimiter{
+		visits:  make(map[string][]time.Time),
+		window:  window,
+		limit:   limit,
+		burst:   burst,
+		cleanup: cleanupInterval,
+	}
+	go rl.startCleanup() // Start goroutine for periodic cleanup
+	return rl
+}
+
+func (rl *RateLimiter) startCleanup() {
+	ticker := time.NewTicker(rl.cleanup)
+	defer ticker.Stop()
+	for range ticker.C {
+		rl.mutex.Lock()
+		for key, times := range rl.visits {
+			now := time.Now()
+			var validTimes []time.Time
+			for _, t := range times {
+				if now.Sub(t) <= rl.window {
+					validTimes = append(validTimes, t)
+				}
+			}
+			if len(validTimes) == 0 {
+				delete(rl.visits, key)
+			} else {
+				rl.visits[key] = validTimes
+			}
+		}
+		rl.mutex.Unlock()
 	}
 }
 
-func (rl *RateLimiter) Allow(ip string) bool {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
+func (rl *RateLimiter) Allow(key string) bool {
+	rl.mutex.Lock()
+	defer rl.mutex.Unlock()
 
 	now := time.Now()
-	if last, exists := rl.visits[ip]; exists {
-		if now.Sub(last) < rl.window {
-			return false
+	times, exists := rl.visits[key]
+	if !exists {
+		times = []time.Time{}
+	}
+
+	// Filter out expired timestamps
+	var validTimes []time.Time
+	for _, t := range times {
+		if now.Sub(t) <= rl.window {
+			validTimes = append(validTimes, t)
 		}
 	}
-	rl.visits[ip] = now
+	validTimes = append(validTimes, now)
+	rl.visits[key] = validTimes
+
+	// Check against limit and burst
+	requestCount := len(validTimes)
+	if requestCount > rl.limit+rl.burst {
+		return false
+	}
+
 	return true
 }
 
 func (rl *RateLimiter) Cleanup() {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
+	rl.mutex.Lock()
+	defer rl.mutex.Unlock()
 
 	now := time.Now()
 	for ip, last := range rl.visits {
@@ -219,7 +267,7 @@ func NewStreamingServer(hlsPrefix, rawPrefix, localPath string) (*StreamingServe
 		hlsPrefix:       hlsPrefix,
 		rawPrefix:       rawPrefix,
 		segmentCache:    NewLRUCache(DefaultCacheSize),
-		rateLimiter:     NewRateLimiter(DefaultRateLimitWindow),
+		rateLimiter:     NewRateLimiter(DefaultRateLimitWindow,DefaultRequestLimit, DefaultBurstLimit, DefaultCleanupInterval),
 		maxCacheSize:    DefaultCacheSize,
 		cacheExpiry:     DefaultCacheExpiry,
 		stats: &StreamingStats{
