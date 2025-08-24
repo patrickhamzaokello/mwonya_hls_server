@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -15,7 +16,6 @@ import (
 	"time"
 
 	"github.com/joho/godotenv"
-	"golang.org/x/sync/singleflight"
 )
 
 // Constants
@@ -53,18 +53,15 @@ type LocalFileHandler struct {
 
 type StreamingServer struct {
 	fileHandler     *LocalFileHandler
-	bucketName      string
-	s3Prefix        string // Folder path for HLS files
-	s3RawPrefix     string // Folder path for raw/non-HLS files
+	hlsPrefix       string // Folder path for HLS files
+	rawPrefix       string // Folder path for raw/non-HLS files
 	tracks          sync.Map // Thread-safe track storage
 	segmentCache    *LRUCache
 	rateLimiter     *RateLimiter
 	stats           *StreamingStats
 	statsMu         sync.RWMutex
-	requestGroup    singleflight.Group
 	maxCacheSize    int
 	cacheExpiry     time.Duration
-	existenceCache  *ExistenceCache
 	isPreloaded     bool
 	preloadMu       sync.RWMutex
 }
@@ -85,12 +82,6 @@ type RateLimiter struct {
 	visits map[string]time.Time
 	mu     sync.Mutex
 	window time.Duration
-}
-
-type ExistenceCache struct {
-	cache map[string]bool
-	mu    sync.RWMutex
-	ttl   time.Duration
 }
 
 func NewLocalFileHandler(basePath string) *LocalFileHandler {
@@ -119,7 +110,7 @@ func (l *LocalFileHandler) FileExists(path string) (bool, error) {
 func (l *LocalFileHandler) ListFiles(prefix string) ([]string, error) {
 	fullPath := filepath.Join(l.basePath, prefix)
 	var files []string
-	
+
 	err := filepath.Walk(fullPath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
@@ -133,7 +124,7 @@ func (l *LocalFileHandler) ListFiles(prefix string) ([]string, error) {
 		}
 		return nil
 	})
-	
+
 	return files, err
 }
 
@@ -216,18 +207,17 @@ func (c *LRUCache) Set(key string, value interface{}, ttl time.Duration) {
 	}
 }
 
-func NewStreamingServer(bucketName, s3Prefix, s3RawPrefix, localPath string) (*StreamingServer, error) {
+func NewStreamingServer(hlsPrefix, rawPrefix, localPath string) (*StreamingServer, error) {
 	// Ensure prefixes end with slash
-	s3Prefix = ensureTrailingSlash(s3Prefix)
-	s3RawPrefix = ensureTrailingSlash(s3RawPrefix)
+	hlsPrefix = ensureTrailingSlash(hlsPrefix)
+	rawPrefix = ensureTrailingSlash(rawPrefix)
 
 	fileHandler := NewLocalFileHandler(localPath)
 
 	server := &StreamingServer{
 		fileHandler:     fileHandler,
-		bucketName:      bucketName,
-		s3Prefix:        s3Prefix,
-		s3RawPrefix:     s3RawPrefix,
+		hlsPrefix:       hlsPrefix,
+		rawPrefix:       rawPrefix,
 		segmentCache:    NewLRUCache(DefaultCacheSize),
 		rateLimiter:     NewRateLimiter(DefaultRateLimitWindow),
 		maxCacheSize:    DefaultCacheSize,
@@ -235,10 +225,6 @@ func NewStreamingServer(bucketName, s3Prefix, s3RawPrefix, localPath string) (*S
 		stats: &StreamingStats{
 			TrackStreams: make(map[string]int64),
 			StartTime:    time.Now(),
-		},
-		existenceCache: &ExistenceCache{
-			cache: make(map[string]bool),
-			ttl:   DefaultCacheExpiry,
 		},
 	}
 	
@@ -256,7 +242,7 @@ func (s *StreamingServer) preloadAllTracks() {
 	log.Println("Starting track metadata preloading...")
 	
 	// List all files in the HLS prefix
-	files, err := s.fileHandler.ListFiles(s.s3Prefix)
+	files, err := s.fileHandler.ListFiles(s.hlsPrefix)
 	if err != nil {
 		log.Printf("Error listing files during preload: %v", err)
 		return
@@ -265,7 +251,7 @@ func (s *StreamingServer) preloadAllTracks() {
 	trackIDs := make(map[string]struct{})
 	for _, file := range files {
 		// Extract track ID from path (format: prefix/trackID/...)
-		relPath := strings.TrimPrefix(file, s.s3Prefix)
+		relPath := strings.TrimPrefix(file, s.hlsPrefix)
 		parts := strings.Split(relPath, "/")
 		if len(parts) > 0 && parts[0] != "" {
 			trackIDs[parts[0]] = struct{}{}
@@ -312,6 +298,10 @@ func getContentTypeByExtension(filename string) string {
 	case ".m4a": return "audio/mp4"
 	case ".aac": return "audio/aac"
 	case ".webm": return "audio/webm"
+	case ".jpg", ".jpeg": return "image/jpeg"
+	case ".png": return "image/png"
+	case ".gif": return "image/gif"
+	case ".svg": return "image/svg+xml"
 	default: return "application/octet-stream"
 	}
 }
@@ -335,7 +325,7 @@ func (s *StreamingServer) loadTrackMetadata(trackID string) (*AudioTrack, error)
 
 func (s *StreamingServer) loadTrackFromFiles(trackID string) (*AudioTrack, error) {
 	// Try HLS location first
-	metadataKey := fmt.Sprintf("%s%s/metadata.json", s.s3Prefix, trackID)
+	metadataKey := fmt.Sprintf("%s%s/metadata.json", s.hlsPrefix, trackID)
 
 	data, err := s.fileHandler.ReadFile(metadataKey)
 	if err == nil {
@@ -347,7 +337,7 @@ func (s *StreamingServer) loadTrackFromFiles(trackID string) (*AudioTrack, error
 	}
 
 	// Try raw location if not found in HLS
-	metadataKey = fmt.Sprintf("%s%s/metadata.json", s.s3RawPrefix, trackID)
+	metadataKey = fmt.Sprintf("%s%s/metadata.json", s.rawPrefix, trackID)
 	data, err = s.fileHandler.ReadFile(metadataKey)
 	if err == nil {
 		var track AudioTrack
@@ -435,8 +425,8 @@ func (s *StreamingServer) handleMasterPlaylist(w http.ResponseWriter, r *http.Re
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.Header().Set("Cache-Control", "max-age=300")
 
-	s3Key := fmt.Sprintf("%s%s/playlist.m3u8", s.s3Prefix, trackID)
-	if data, err := s.fetchFromLocalFiles(s3Key); err == nil {
+	key := fmt.Sprintf("%s%s/playlist.m3u8", s.hlsPrefix, trackID)
+	if data, err := s.fetchFromLocalFiles(key); err == nil {
 		fixedData := s.fixPlaylistURLs(data, trackID, false)
 		w.Write(fixedData)
 		log.Printf("Served master playlist for track: %s (%s)", track.Title, trackID)
@@ -454,7 +444,6 @@ func (s *StreamingServer) updateStats(trackID string) {
 	s.stats.TrackStreams[trackID]++
 	s.stats.ActiveStreams++
 }
-
 
 func (s *StreamingServer) handleQualityPlaylist(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/stream/")
@@ -481,8 +470,8 @@ func (s *StreamingServer) handleQualityPlaylist(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	s3Key := fmt.Sprintf("%s%s/%s/playlist.m3u8", s.s3Prefix, trackID, quality)
-	data, err := s.fetchFromLocalFiles(s3Key)
+	key := fmt.Sprintf("%s%s/%s/playlist.m3u8", s.hlsPrefix, trackID, quality)
+	data, err := s.fetchFromLocalFiles(key)
 	if err != nil {
 		log.Printf("Error fetching quality playlist: %v", err)
 		http.Error(w, "Playlist not found", http.StatusNotFound)
@@ -556,8 +545,8 @@ func (s *StreamingServer) handleSegment(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Fetch from local files
-	s3Key := fmt.Sprintf("%s%s/%s/%s", s.s3Prefix, trackID, quality, segmentFile)
-	data, err := s.fetchFromLocalFiles(s3Key)
+	key := fmt.Sprintf("%s%s/%s/%s", s.hlsPrefix, trackID, quality, segmentFile)
+	data, err := s.fetchFromLocalFiles(key)
 	if err != nil {
 		log.Printf("Error fetching segment: %v", err)
 		http.Error(w, "Segment not found", http.StatusNotFound)
@@ -612,26 +601,26 @@ func (s *StreamingServer) handleDirectFile(w http.ResponseWriter, r *http.Reques
 	s.updateStats(trackID)
 
 	fileExt := getFileExtension(r)
-	s3Key := findExistingFile(s, trackID, fileExt)
-	if s3Key == "" {
+	key := findExistingFile(s, trackID, fileExt)
+	if key == "" {
 		s.fallbackToHLS(w, r, trackID)
 		return
 	}
 
 	// Serve file directly
-	data, err := s.fetchFromLocalFiles(s3Key)
+	data, err := s.fetchFromLocalFiles(key)
 	if err != nil {
-		log.Printf("Error reading file %s: %v", s3Key, err)
+		log.Printf("Error reading file %s: %v", key, err)
 		http.Error(w, "File not found", http.StatusNotFound)
 		return
 	}
 
-	contentType := getContentTypeByExtension(s3Key)
+	contentType := getContentTypeByExtension(key)
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
 	w.Header().Set("Cache-Control", "max-age=86400")
 	w.Write(data)
-	log.Printf("Served direct file: %s", s3Key)
+	log.Printf("Served direct file: %s", key)
 }
 
 func getFileExtension(r *http.Request) string {
@@ -643,8 +632,8 @@ func getFileExtension(r *http.Request) string {
 
 func findExistingFile(s *StreamingServer, trackID, fileExt string) string {
 	possibleKeys := []string{
-		fmt.Sprintf("%s%s/%s.%s", s.s3RawPrefix, trackID, trackID, fileExt),
-		fmt.Sprintf("%s%s.%s", s.s3RawPrefix, trackID, fileExt),
+		fmt.Sprintf("%s%s/%s.%s", s.rawPrefix, trackID, trackID, fileExt),
+		fmt.Sprintf("%s%s.%s", s.rawPrefix, trackID, fileExt),
 	}
 
 	for _, key := range possibleKeys {
@@ -657,7 +646,7 @@ func findExistingFile(s *StreamingServer, trackID, fileExt string) string {
 }
 
 func (s *StreamingServer) fallbackToHLS(w http.ResponseWriter, r *http.Request, trackID string) {
-	hlsMasterKey := fmt.Sprintf("%s%s/playlist.m3u8", s.s3Prefix, trackID)
+	hlsMasterKey := fmt.Sprintf("%s%s/playlist.m3u8", s.hlsPrefix, trackID)
 	
 	exists, err := s.fileHandler.FileExists(hlsMasterKey)
 	if err != nil || !exists {
@@ -734,6 +723,61 @@ func (s *StreamingServer) handleTrackList(w http.ResponseWriter, r *http.Request
 	json.NewEncoder(w).Encode(tracks)
 }
 
+func (s *StreamingServer) handleUpload(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	err := r.ParseMultipartForm(32 << 20) // 32MB max
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	file, handler, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+
+	relPath := r.FormValue("path")
+	if relPath == "" {
+		relPath = handler.Filename
+	}
+
+	// Prevent path traversal
+	relPath = filepath.Clean(relPath)
+	if strings.Contains(relPath, "..") {
+		http.Error(w, "Invalid path", http.StatusBadRequest)
+		return
+	}
+
+	fullPath := filepath.Join(s.fileHandler.basePath, relPath)
+	dir := filepath.Dir(fullPath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	f, err := os.OpenFile(fullPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0644)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer f.Close()
+
+	_, err = io.Copy(f, file)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Upload successful"))
+}
+
 func loggingMiddleware(next http.HandlerFunc) http.HandlerFunc {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
@@ -747,6 +791,15 @@ func loggingMiddleware(next http.HandlerFunc) http.HandlerFunc {
 
 		next.ServeHTTP(w, r)
 
+		duration := time.Since(start)
+		log.Printf("%s %s %v", r.Method, r.URL.Path, duration)
+	})
+}
+
+func loggingMiddlewareHandler(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		next.ServeHTTP(w, r)
 		duration := time.Since(start)
 		log.Printf("%s %s %v", r.Method, r.URL.Path, duration)
 	})
@@ -767,28 +820,22 @@ func (s *StreamingServer) discoverNewTracks() {
 }
 
 type serverConfig struct {
-	bucketName      string
-	s3Prefix       string
-	s3RawPrefix    string
+	hlsPrefix       string
+	rawPrefix       string
 	localAssetsPath string
-	port           string
-	staticDir      string
+	port            string
+	staticDir       string
 	preloadOnStartup bool
 }
 
 func loadConfig() *serverConfig {
 	cfg := &serverConfig{
-		bucketName:      os.Getenv("S3_BUCKET_NAME"),
-		s3Prefix:       getEnvWithDefault("S3_PREFIX", "hls"),
-		s3RawPrefix:    getEnvWithDefault("S3_RAW_PREFIX", "raw/"),
+		hlsPrefix:       getEnvWithDefault("HLS_PREFIX", "hls/"),
+		rawPrefix:       getEnvWithDefault("RAW_PREFIX", "raw/"),
 		localAssetsPath: getEnvWithDefault("LOCAL_ASSETS_PATH", "/app/mwonya_assets"),
-		port:           getEnvWithDefault("PORT", DefaultPort),
-		staticDir:      "./static",
+		port:            getEnvWithDefault("PORT", DefaultPort),
+		staticDir:       "./static",
 		preloadOnStartup: getEnvBoolWithDefault("PRELOAD_ON_STARTUP", true),
-	}
-
-	if cfg.bucketName == "" {
-		log.Fatal("S3_BUCKET_NAME environment variable is required for compatibility")
 	}
 
 	return cfg
@@ -815,7 +862,7 @@ func serveStaticFiles(staticDir string) {
 		log.Printf("Warning: Static directory '%s' not found, skipping static file serving", staticDir)
 	} else {
 		fs := http.FileServer(http.Dir(staticDir))
-		http.Handle("/", fs)
+		http.Handle("/", loggingMiddlewareHandler(fs))
 		log.Printf("Serving static files from %s directory", staticDir)
 	}
 }
@@ -853,6 +900,10 @@ func setupRoutes(server *StreamingServer) {
 		server.handleDirectFile(w, r)
 	}))
 
+	http.HandleFunc("/upload", loggingMiddleware(server.handleUpload))
+
+	http.Handle("/assets/", loggingMiddlewareHandler(http.StripPrefix("/assets/", http.FileServer(http.Dir(server.fileHandler.basePath)))))
+
 	http.HandleFunc("/health", loggingMiddleware(server.handleHealth))
 	http.HandleFunc("/stats", loggingMiddleware(server.handleStats))
 	http.HandleFunc("/tracks", loggingMiddleware(server.handleTrackList))
@@ -877,10 +928,12 @@ func startBackgroundTasks(server *StreamingServer) {
 func logServerInfo(config *serverConfig, server *StreamingServer) {
 	log.Printf("🚀 Local Audio Streaming Server starting on port %s", config.port)
 	log.Printf("📁 Local Assets Path: %s", config.localAssetsPath)
-	log.Printf("📁 HLS Prefix: %s", config.s3Prefix)
-	log.Printf("📁 Raw Prefix: %s", config.s3RawPrefix)
+	log.Printf("📁 HLS Prefix: %s", config.hlsPrefix)
+	log.Printf("📁 Raw Prefix: %s", config.rawPrefix)
 	log.Printf("🎵 HLS Stream URL format: http://localhost:%s/stream/TRACK_ID/playlist.m3u8", config.port)
 	log.Printf("🎵 Direct File URL format: http://localhost:%s/file/TRACK_ID", config.port)
+	log.Printf("📁 Assets URL format: http://localhost:%s/assets/<path>", config.port)
+	log.Printf("📤 Upload URL: http://localhost:%s/upload (POST with 'file' and optional 'path')", config.port)
 	log.Printf("❤️  Health check: http://localhost:%s/health", config.port)
 	log.Printf("📊 Stats: http://localhost:%s/stats", config.port)
 	log.Printf("🎶 Track list: http://localhost:%s/tracks", config.port)
@@ -896,9 +949,8 @@ func main() {
 	config := loadConfig()
 
 	server, err := NewStreamingServer(
-		config.bucketName,
-		config.s3Prefix,
-		config.s3RawPrefix,
+		config.hlsPrefix,
+		config.rawPrefix,
 		config.localAssetsPath,
 	)
 	if err != nil {

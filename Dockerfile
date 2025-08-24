@@ -25,7 +25,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
 # Final stage - minimal runtime image
 FROM alpine:latest
 
-# Install ca-certificates for HTTPS requests to AWS
+# Install ca-certificates for HTTPS requests if needed
 RUN apk --no-cache add ca-certificates tzdata
 
 # Create non-root user for security
