@@ -202,7 +202,7 @@ func (rl *RateLimiter) Cleanup() {
 	defer rl.mutex.Unlock()
 
 	now := time.Now()
-	for ip, last := range rl.visits {
+	for ip := range rl.visits {
 		if len(times) == 0 || now.Sub(times[len(times)-1]) > 5*time.Minute {
 			delete(rl.visits, ip)
 		}
